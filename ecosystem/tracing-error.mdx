@@ -15,9 +15,13 @@ This crate is currently **experimental**. Its API may change before a stable 1.0
 ```toml
 [dependencies]
 tracing-error = "0.2"
+```
 
-# Enable TracedError and its extension traits:
-# tracing-error = { version = "0.2", features = ["traced-error"] }
+The `traced-error` feature is **enabled by default** and unlocks the `TracedError` type and its associated extension traits. To use only `SpanTrace` and `ErrorLayer` without the extra trait impls, disable it explicitly:
+
+```toml
+[dependencies]
+tracing-error = { version = "0.2", default-features = false }
 ```
 
 ## Installing the ErrorLayer
@@ -91,7 +95,7 @@ match trace.status() {
 
 ## The `traced-error` Feature
 
-Enabling the `traced-error` feature unlocks additional types and traits for attaching a `SpanTrace` to an existing error value without creating a custom wrapper type.
+The `traced-error` feature (enabled by default) unlocks additional types and traits for attaching a `SpanTrace` to an existing error value without creating a custom wrapper type.
 
 ### InstrumentResult and InstrumentError
 
@@ -172,7 +176,7 @@ fn print_naive_spantraces(error: &(dyn Error + 'static)) {
 ```toml
 [dependencies]
 color-eyre   = "0.6"
-tracing-error = { version = "0.2", features = ["traced-error"] }
+tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
 

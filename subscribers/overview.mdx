@@ -1,7 +1,7 @@
 ---
-title: "Subscribers: Collecting Tracing Data in Rust"
+title: "Tracing Subscribers: Collecting Diagnostic Data in Rust"
 sidebarTitle: "Overview"
-description: "Learn how tracing subscribers and layers collect, filter, and dispatch structured diagnostic data in Rust applications."
+description: "Learn how tracing-subscriber's subscribers and layers collect, filter, and dispatch structured diagnostic data in Rust applications using feature flags."
 ---
 
 Subscribers are the backbone of the `tracing` ecosystem. Every span and event emitted by your instrumentation must be _collected_ by something — a subscriber receives those notifications and decides what to do with them: write to stdout, emit JSON, export to a tracing backend, or discard them entirely. The `tracing-subscriber` crate provides both the abstractions and a set of batteries-included implementations for building that collection pipeline.
@@ -107,13 +107,17 @@ This composability is the central design idea of `tracing-subscriber`: instead o
 | Feature | Default | Description |
 |---|---|---|
 | `std` | ✅ | Enables APIs that depend on the Rust standard library |
-| `alloc` | ✅ | Enables `liballoc`-dependent APIs (implied by `std`) |
-| `fmt` | ✅ | The `fmt` module and `FmtSubscriber` for formatted log output |
+| `alloc` | ❌ | Enables `liballoc`-dependent APIs (implied by `std`) |
+| `fmt` | ✅ | The `fmt` module and `FmtSubscriber` for formatted log output (requires `registry` and `std`) |
 | `ansi` | ✅ | ANSI terminal colour support in the `fmt` subscriber |
-| `registry` | ✅ | The `Registry` type for per-span storage |
+| `registry` | ❌ | The `Registry` type for per-span storage (enabled implicitly by `fmt`) |
 | `env-filter` | ❌ | `EnvFilter` for `RUST_LOG`-style runtime filtering |
-| `json` | ❌ | JSON output format in `fmt` (requires `fmt`) |
+| `json` | ❌ | JSON output format in `fmt` (requires `fmt` and `std`) |
 | `local-time` | ❌ | Local-timezone timestamp formatting via the `time` crate |
+
+<Note>
+The `registry` feature is not in the default feature list directly, but is always enabled in practice because the `fmt` feature (which is default) depends on it. Similarly, `alloc` is implied by `std`.
+</Note>
 
 To add `tracing-subscriber` with the `env-filter` and `json` features enabled:
 

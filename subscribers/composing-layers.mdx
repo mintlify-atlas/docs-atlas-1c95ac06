@@ -1,7 +1,7 @@
 ---
-title: "Composing Multiple Layers into a Subscriber"
+title: "Composing Multiple tracing Layers into a Subscriber"
 sidebarTitle: "Composing Layers"
-description: "Build flexible tracing pipelines by stacking multiple layers on a Registry, with per-layer filtering and dynamic layer configuration."
+description: "Build flexible tracing pipelines by stacking multiple layers on a Registry, with per-layer filtering and dynamic layer configuration in tracing-subscriber."
 ---
 
 One of the most powerful features of `tracing-subscriber` is the ability to compose multiple independent layers into a single subscriber. Rather than writing one monolithic `Subscriber` that handles formatting, filtering, and every output destination, you build a pipeline from small, reusable pieces — each `Layer` focused on a single concern. A `fmt` layer handles text output, an `EnvFilter` layer handles filtering, a custom metrics layer handles counters, and so on. They all coexist on the same `Registry` base and each sees the exact subset of spans and events it needs.
@@ -16,11 +16,14 @@ The key methods you can override are:
 |---|---|
 | `on_new_span` | A new span is created |
 | `on_record` | A span records additional field values |
+| `on_follows_from` | A span records a causality relationship to another span |
 | `on_event` | An `event!` macro fires |
 | `on_enter` | A span is entered |
 | `on_exit` | A span is exited |
 | `on_close` | A span is dropped / closed |
+| `on_id_change` | A span ID is cloned and a new ID is returned |
 | `enabled` | Determines global enablement of a span or event |
+| `event_enabled` | Called before `on_event` to allow final per-event filtering |
 | `register_callsite` | First time a callsite is encountered (cached) |
 
 All methods have default no-op implementations, so you only need to implement what you care about.
@@ -115,12 +118,12 @@ tracing::error!(target: "http_access", "HTTP request failed");
 ```
 
 <Note>
-Per-layer filtering requires the `registry` feature flag (enabled by default). Only `Registry` and subscribers built on it support per-layer filters.
+Per-layer filtering requires the `registry` feature flag (enabled by default via the `fmt` feature). Only `Registry` and subscribers built on it support per-layer filters.
 </Note>
 
 ## The Per-Layer Filter Example
 
-The `per-layer-filter` example from the `tracing` repository demonstrates a common real-world pattern — pretty-printed DEBUG output to stdout alongside JSON-formatted WARN output to a log file:
+The `per-layer-filter` example from the `tracing` repository demonstrates a common real-world pattern — pretty-printed DEBUG output to stdout alongside JSON-formatted WARN output to a log file via `tracing-appender`:
 
 ```rust
 use std::io;
@@ -131,6 +134,10 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
     Layer,
 };
+
+// Set up a non-blocking file writer (requires the `tracing-appender` crate)
+let file_appender = tracing_appender::rolling::never(dir.path(), "app.log");
+let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
 // A pretty-printed stdout layer that captures DEBUG and above.
 let stdout_layer = fmt::layer()

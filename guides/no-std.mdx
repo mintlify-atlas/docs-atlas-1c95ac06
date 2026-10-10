@@ -1,5 +1,5 @@
 ---
-title: "Using Tracing in no_std and Embedded Rust"
+title: "Using tracing in no_std and Embedded Rust Environments"
 sidebarTitle: "no_std Usage"
 description: "Configure tracing and tracing-core for no_std and embedded Rust targets, including which APIs are available without the standard library."
 ---
@@ -112,8 +112,11 @@ With `alloc` enabled you gain access to the `Layer` combinator infrastructure an
 
 | Feature | Default | Description |
 |---|---|---|
-| `std` | ✅ Yes | Enables `std::sync::Once` and other std primitives |
-| `valuable` | ❌ No | Support for the `valuable` crate (unstable) |
+| `std` | ✅ Yes | Enables `std::sync::Once` and other std primitives; without it a vendored spin-based `Once` is used |
+
+<Note>
+  `tracing-core` does not expose a stable `valuable` feature flag in its `[features]` section. Support for the `valuable` crate in `tracing-core` is an **unstable** feature gated by the `--cfg tracing_unstable` rustc flag and the optional `valuable` dependency under `[target.'cfg(tracing_unstable)'.dependencies]`. It is not activated by a Cargo feature alone.
+</Note>
 
 ### `tracing-subscriber` feature flags (no_std-relevant)
 
@@ -193,11 +196,10 @@ Register it as the global default in your `#[entry]` or `main` function:
 ```rust
 use tracing::subscriber::set_global_default;
 
-static SUBSCRIBER: MinimalSubscriber = MinimalSubscriber::new();
-
 #[entry]
 fn main() -> ! {
-    set_global_default(&SUBSCRIBER).expect("subscriber already set");
+    set_global_default(MinimalSubscriber::new())
+        .expect("subscriber already set");
 
     tracing::info!("system initialised");
     loop {}
@@ -205,5 +207,5 @@ fn main() -> ! {
 ```
 
 <Note>
-  `set_global_default` is available in `no_std` builds because it only uses the `alloc`-backed callsite registry, not any `std::sync` primitives. The spin-based `Once` implementation vendored in `tracing-core` handles the single-initialisation guarantee on targets without `std`.
+  `set_global_default` is available in `no_std` builds because it only uses the `alloc`-backed callsite registry, not any `std::sync` primitives. The spin-based `Once` implementation vendored in `tracing-core` handles the single-initialisation guarantee on targets without `std`. `set_global_default` takes the subscriber by value and wraps it in an `Arc` internally, so you do not need a `static` binding.
 </Note>

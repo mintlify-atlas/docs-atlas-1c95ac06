@@ -1,5 +1,5 @@
 ---
-title: "Get Started with Tracing in Rust"
+title: "Get Started with tracing: Add Structured Diagnostics"
 sidebarTitle: "Quickstart"
 description: "Add tracing to a Rust project in five steps: declare dependencies, initialize a subscriber, emit events, create spans, and run with RUST_LOG filtering."
 ---
@@ -159,7 +159,7 @@ RUST_LOG=my_crate::orders=debug cargo run
 
 Example terminal output from `RUST_LOG=debug cargo run`:
 
-```
+```text
 2024-01-15T10:23:01.456Z DEBUG my_crate: entered process_order order_id=1001
 2024-01-15T10:23:01.456Z DEBUG my_crate: processing items order_id=1001 item_count=3
 2024-01-15T10:23:01.456Z  INFO my_crate: order processing started order_id=1001
@@ -175,7 +175,7 @@ Here is a self-contained example combining all the pieces — a small library cr
 
 ```rust
 use tracing::{debug, error, info, warn, instrument, Level};
-use tracing::{span};
+use tracing::span;
 use std::{error::Error, io};
 
 // ── Library code ─────────────────────────────────────────────────────────────

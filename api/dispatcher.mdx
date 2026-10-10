@@ -84,7 +84,7 @@ impl tracing_core::Subscriber for MySubscriber {
 `Dispatch` forwards every `Subscriber` method to its inner subscriber. The delegation methods have identical signatures to the corresponding `Subscriber` methods:
 
 | `Dispatch` method | Delegates to |
-|-------------------|--------------|
+|-------------------|--------------| 
 | `dispatch.enabled(metadata)` | `Subscriber::enabled` |
 | `dispatch.new_span(attrs)` | `Subscriber::new_span` |
 | `dispatch.record(id, values)` | `Subscriber::record` |

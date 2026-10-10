@@ -59,7 +59,17 @@ With `log` enabled, every `tracing::event!` call falls back to emitting a `log::
 
 ## LogTracer Configuration
 
-For more control, use `LogTracer::builder()` instead of `LogTracer::init()`:
+For more control, use `LogTracer::builder()` instead of `LogTracer::init()`. You can also use `LogTracer::init_with_filter(level)` as a shortcut when you only need to set a maximum log level:
+
+```rust
+use tracing_log::LogTracer;
+
+// Shortcut: initialise with a single level filter
+LogTracer::init_with_filter(log::LevelFilter::Info)
+    .expect("failed to set logger");
+```
+
+For full control over filtering and ignored crates, use the builder:
 
 ```rust
 use tracing_log::LogTracer;
@@ -81,7 +91,7 @@ The builder's key methods:
 |---|---|
 | `.with_max_level(filter)` | Drop log records above the given verbosity level before forwarding. |
 | `.ignore_crate(name)` | Silently discard records whose target starts with `name`. Useful when a crate enables `tracing/log` and would otherwise be recorded twice. |
-| `.ignore_all(crates)` | Convenience variant accepting an iterator of crate names. |
+| `.ignore_all(crates)` | Convenience variant accepting an iterator of crate name strings. |
 
 ## Caution: Mixing Both Conversions
 
@@ -99,7 +109,7 @@ Do **not** use `LogTracer` together with a `tracing` subscriber that re-emits ev
 |---|---|---|
 | `std` | ✅ | Enables features requiring the Rust standard library. |
 | `log-tracer` | ✅ | Provides the `LogTracer` type. |
-| `interest-cache` | ❌ | Adds a per-thread LRU cache to speed up interest checks for `log` records (requires `std`). |
+| `interest-cache` | ❌ | Adds a per-thread LRU cache to speed up interest checks for `log` records (requires `std` and `log-tracer`). |
 
 ## AsLog and AsTrace Conversion Traits
 
@@ -116,3 +126,19 @@ let tracing_level: tracing_core::Level = log::Level::Info.as_trace();
 ```
 
 These are primarily useful when building custom subscriber layers or formatters that need to interoperate with `log`-aware infrastructure.
+
+## NormalizeEvent
+
+The `NormalizeEvent` trait provides access to the full original metadata of a `log`-originated `tracing::Event`. Because `Event` requires its `Metadata` to be `'static`, events produced from `log::Record`s have a hard-coded `"log"` target and no `file`, `line`, or `module_path` fields. `NormalizeEvent::normalized_metadata()` reconstructs a complete `Metadata` value that lives as long as the event:
+
+```rust
+use tracing_log::NormalizeEvent;
+
+// Inside a Layer::on_event implementation:
+fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    if let Some(meta) = event.normalized_metadata() {
+        // meta now contains the original file, line, module_path, and target
+        println!("file: {:?}, line: {:?}", meta.file(), meta.line());
+    }
+}
+```

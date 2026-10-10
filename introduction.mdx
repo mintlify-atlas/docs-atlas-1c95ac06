@@ -1,5 +1,5 @@
 ---
-title: "Tracing: Application-Level Diagnostics for Rust"
+title: "Tracing: Structured Diagnostics for Rust Applications"
 sidebarTitle: "Introduction"
 description: "tracing is a framework for instrumenting Rust programs to collect structured, event-based diagnostic information with spans, events, and subscribers."
 ---
@@ -53,6 +53,12 @@ The `tokio-rs/tracing` repository is a Cargo workspace containing several focuse
 | [`tracing-error`](https://crates.io/crates/tracing-error) | `SpanTrace` — attach span context directly to error types |
 | [`tracing-flame`](https://crates.io/crates/tracing-flame) | Generate flame graphs from span entry/exit events |
 | [`tracing-log`](https://crates.io/crates/tracing-log) | Compatibility layer to consume `log` records as `tracing` events |
+| [`tracing-journald`](https://crates.io/crates/tracing-journald) | Layer for recording events to the Linux `journald` service with structured data |
+| [`tracing-futures`](https://crates.io/crates/tracing-futures) | Utilities for instrumenting `futures`, `Stream`s, and `Executor`s |
+| [`tracing-serde`](https://crates.io/crates/tracing-serde) | Compatibility layer for serializing trace data with `serde` |
+| [`tracing-tower`](https://crates.io/crates/tracing-tower) | Compatibility with the `tower` middleware ecosystem |
+| [`tracing-mock`](https://crates.io/crates/tracing-mock) | Testing utilities for asserting on spans and events emitted by instrumented code |
+| [`tracing-macros`](https://crates.io/crates/tracing-macros) | Experimental macros for emitting trace events (unstable) |
 
 **Libraries** should depend only on `tracing` (or `tracing-core` for maximum stability). **Applications** add `tracing-subscriber` (and optionally other output crates) to actually collect and display diagnostics.
 

@@ -197,21 +197,33 @@ fn my_function() -> i32 {
 }
 ```
 
-For `Result`-returning functions, `ret` only fires on `Ok`. You can also override the level and formatting:
+For `Result`-returning functions, `ret` only fires on `Ok`. You can also override the level and formatting independently:
 
 ```rust
 use tracing::{instrument, Level};
 
 // Records the return value at WARN level using Display
+#[instrument(ret(level = Level::WARN))]
+fn my_function_warn() -> i32 {
+    42
+}
+
+// Records using Display formatting instead of Debug
+#[instrument(ret(Display))]
+fn my_function_display() -> i32 {
+    42
+}
+
+// Both level and format can be combined
 #[instrument(ret(level = Level::WARN, Display))]
-fn my_function() -> i32 {
+fn my_function_combined() -> i32 {
     42
 }
 ```
 
 ### `err` — Record Errors
 
-Add `err` to emit an event when a `Result`-returning function returns `Err`. The error is recorded using `fmt::Display` by default:
+Add `err` to emit an event when a `Result`-returning function returns `Err`. The error is recorded using `fmt::Display` by default, and the event level defaults to `ERROR`:
 
 ```rust
 use tracing::instrument;
@@ -285,6 +297,31 @@ impl MyStruct {
     // Use the struct's `span` field as the parent span
     #[instrument(parent = &self.span, skip(self))]
     fn my_method(&self) {}
+}
+```
+
+### `follows_from` — Declare Causal Relationships
+
+Use `follows_from` to declare that the generated span has an indirect causal relationship with one or more other spans. This corresponds to [`Span::follows_from`](https://docs.rs/tracing/latest/tracing/struct.Span.html#method.follows_from) and models situations where a span is caused by — but does not execute inside — a prior span:
+
+```rust
+use tracing::instrument;
+
+// Accepts any expression of type `impl IntoIterator<Item = impl Into<Option<Id>>>`
+#[instrument(follows_from = causes)]
+pub fn my_function(causes: &[tracing::Id]) {
+    // ...
+}
+```
+
+A single span reference also works:
+
+```rust
+use tracing::instrument;
+
+#[instrument(follows_from = [cause])]
+pub fn my_function(cause: &tracing::span::EnteredSpan) {
+    // ...
 }
 ```
 
@@ -375,13 +412,16 @@ Each call to `nth_fibonacci` creates a new span with `n` recorded as a field, an
     `ret` or `ret(level = Level::WARN)` or `ret(Display)` — Emit an event with the return value on success.
   </Step>
   <Step title="err">
-    `err` or `err(level = Level::INFO)` or `err(Debug)` — Emit an event with the error on `Err` returns.
+    `err` or `err(level = Level::INFO)` or `err(Debug)` — Emit an event with the error on `Err` returns (default level: `ERROR`).
   </Step>
   <Step title="target">
     `target = "my_module"` — Override the span's target string.
   </Step>
   <Step title="parent">
     `parent = &span` or `parent = None` — Set an explicit parent span or mark the span as a root.
+  </Step>
+  <Step title="follows_from">
+    `follows_from = expr` — Declare indirect causal relationships with one or more prior spans.
   </Step>
 </Steps>
 

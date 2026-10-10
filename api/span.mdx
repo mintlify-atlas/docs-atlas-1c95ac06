@@ -1,10 +1,10 @@
 ---
-title: "Span API Reference: Execution Context in Tracing"
+title: "Span API Reference: Context, Fields, and Instrumentation"
 sidebarTitle: "Span"
 description: "Full API reference for the Span struct — entering, recording fields, causal relationships, async instrumentation, and the Instrument trait for futures."
 ---
 
-A span represents a period of time during which a program was executing in a particular context. Every span has a name, a verbosity level, a set of typed key-value fields, and a unique [`Id`](#id) assigned by the active subscriber. Spans form a tree: when a new span is created while another span is executing, the new span becomes a child of the current one. The [`Span`](#the-span-struct) struct is a cloneable, `Send + Sync` handle to a span — holding a `Span` does not mean you are inside it. You must explicitly _enter_ the span to make it the active context on the current thread.
+A span represents a period of time during which a program was executing in a particular context. Every span has a name, a verbosity level, a set of typed key-value fields, and a unique [`Id`](#the-id-type) assigned by the active subscriber. Spans form a tree: when a new span is created while another span is executing, the new span becomes a child of the current one. The [`Span`](#the-span-struct) struct is a cloneable, `Send + Sync` handle to a span — holding a `Span` does not mean you are inside it. You must explicitly _enter_ the span to make it the active context on the current thread.
 
 ---
 
@@ -126,6 +126,26 @@ let json = span.in_scope(|| serde_json::to_string(&payload).unwrap());
 
 ---
 
+### `span.or_current`
+
+```rust
+pub fn or_current(self) -> Self
+```
+
+Returns this span if it is enabled; otherwise returns `Span::current()`. Useful when you want to inherit the current span context if no explicit span was provided.
+
+```rust
+use tracing::Span;
+
+fn process(span: Option<Span>) {
+    let span = span.unwrap_or_else(Span::none).or_current();
+    let _enter = span.enter();
+    // always runs inside some span
+}
+```
+
+---
+
 ## Recording Fields
 
 ### `span.record`
@@ -157,30 +177,45 @@ To record several fields in a single call, use the [`record_all!`](/api/macros) 
 
 ---
 
-## Causal Relationships
+## Inspecting a Span
 
-### `span.follows_from`
-
-```rust
-pub fn follows_from(&self, from: impl Into<Option<Id>>) -> &Self
-```
-
-Declares that this span has an indirect causal relationship with another span identified by `from`. Unlike the parent-child relationship, a follows-from relationship does not imply that the follower is part of the precedent's duration. A span may have any number of predecessors.
+### `span.field`
 
 ```rust
-use tracing::{info_span, Span};
-
-let listener_span = info_span!("listener");
-// Spawn a handler task
-let handler_span = info_span!("handler");
-handler_span.follows_from(&listener_span);
+pub fn field<Q: field::AsField + ?Sized>(&self, field: &Q) -> Option<field::Field>
 ```
 
-Accepts any type that converts to `Option<Id>`: a `Span`, `&Span`, an `Id`, or `None`.
+Returns the [`Field`] descriptor for the named field if this span was created with that field, or `None` otherwise. Accepts both `&str` field names and existing `Field` instances.
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("work", task_id = 0u64);
+if let Some(f) = span.field("task_id") {
+    println!("field: {}", f.name());
+}
+```
 
 ---
 
-## Inspecting a Span
+### `span.has_field`
+
+```rust
+pub fn has_field<Q: field::AsField + ?Sized>(&self, field: &Q) -> bool
+```
+
+Returns `true` if this span was created with the specified field. Equivalent to `span.field(name).is_some()`.
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("work", task_id = 0u64, status = tracing::field::Empty);
+assert!(span.has_field("task_id"));
+assert!(span.has_field("status"));
+assert!(!span.has_field("nonexistent"));
+```
+
+---
 
 ### `span.id`
 
@@ -188,7 +223,7 @@ Accepts any type that converts to `Option<Id>`: a `Span`, `&Span`, an `Id`, or `
 pub fn id(&self) -> Option<Id>
 ```
 
-Returns the span's unique [`Id`](#id) if the span is enabled, or `None` if it is disabled.
+Returns the span's unique [`Id`](#the-id-type) if the span is enabled, or `None` if it is disabled.
 
 ---
 
@@ -219,6 +254,29 @@ pub fn metadata(&self) -> Option<&'static Metadata<'static>>
 ```
 
 Returns the static [`Metadata`](/api/event#metadata) describing this span's name, target, level, and fields. Returns `None` only for spans created with `Span::none()`.
+
+---
+
+## Causal Relationships
+
+### `span.follows_from`
+
+```rust
+pub fn follows_from(&self, from: impl Into<Option<Id>>) -> &Self
+```
+
+Declares that this span has an indirect causal relationship with another span identified by `from`. Unlike the parent-child relationship, a follows-from relationship does not imply that the follower is part of the precedent's duration. A span may have any number of predecessors.
+
+```rust
+use tracing::{info_span, Span};
+
+let listener_span = info_span!("listener");
+// Spawn a handler task
+let handler_span = info_span!("handler");
+handler_span.follows_from(&listener_span);
+```
+
+Accepts any type that converts to `Option<Id>`: a `Span`, `&Span`, an `Id`, or `None`.
 
 ---
 

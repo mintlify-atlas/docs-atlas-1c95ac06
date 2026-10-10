@@ -17,6 +17,13 @@ This crate is currently **experimental**. Requires rustc 1.71+.
 tracing-flame = "0.2"
 ```
 
+The default feature set includes `smallvec` (via `tracing-subscriber/smallvec`) for more efficient internal span storage. You can disable it to reduce compile-time dependencies:
+
+```toml
+[dependencies]
+tracing-flame = { version = "0.2", default-features = false }
+```
+
 ## What Are Flamegraphs?
 
 A **flamegraph** collapses identical call stacks and sorts frames alphabetically so you can immediately see which code paths consumed the most cumulative time. This is ideal for long-running programs or multithreaded workloads where the same logical path occurs many times.
@@ -55,7 +62,7 @@ The `FlushGuard` returned by `with_file` (or `flush_on_drop`) **must be kept ali
 
 ### Providing a custom writer
 
-If you need more control over the output destination, pass any `std::io::Write` implementation to `FlameLayer::new` and call `flush_on_drop` manually to obtain a `FlushGuard`:
+If you need more control over the output destination, pass any `std::io::Write` implementation to `FlameLayer::new` and call `flush_on_drop` to obtain a `FlushGuard`:
 
 ```rust
 use std::{fs::File, io::BufWriter};
@@ -97,7 +104,7 @@ let flame_layer = flame_layer
 
 ## Complete Example
 
-The following pattern — used in the `inferno-flame` example — creates the subscriber, exercises some instrumented code, drops the guard to flush output, then generates the SVG in-process:
+The following pattern creates the subscriber, exercises some instrumented code, drops the guard to flush output, then generates the SVG in-process:
 
 ```rust
 use std::path::Path;

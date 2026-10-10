@@ -1,7 +1,7 @@
 ---
-title: "fmt Module API: Formatting and Logging Trace Data"
+title: "fmt Module API: Formatting and Outputting Trace Data"
 sidebarTitle: "fmt"
-description: "The tracing-subscriber fmt module provides a human-readable and structured subscriber for logging spans and events to stdout, files, or any custom writer."
+description: "The fmt module provides a configurable subscriber for formatting tracing spans and events as human-readable text, JSON, or custom output to any writer."
 ---
 
 The `fmt` module in `tracing-subscriber` provides a complete, configurable subscriber for formatting and writing `tracing` spans and events as text. It is the most common starting point for instrumenting Rust applications: a single call to `tracing_subscriber::fmt::init()` installs a global subscriber that reads filter directives from the `RUST_LOG` environment variable and writes formatted log output to stdout. For production use, the module also exposes a composable `Layer` variant that can be stacked alongside other layers on top of a `Registry`, supporting per-layer filtering, JSON output, custom writers, and more.
@@ -106,7 +106,9 @@ pub struct SubscriberBuilder<
 | `.with_thread_ids(bool)` | Show or hide the current thread ID. Default: `false`. |
 | `.with_thread_names(bool)` | Show or hide the current thread name. Default: `false`. |
 | `.with_ansi(bool)` | Enable or disable ANSI terminal color codes. Requires the `ansi` feature. |
+| `.with_ansi_sanitization(bool)` | Strip ANSI escape codes from output. Useful when writing to non-terminal sinks. |
 | `.with_span_events(FmtSpan)` | Emit synthetic events at span lifecycle points (`NEW`, `ENTER`, `EXIT`, `CLOSE`, `FULL`, etc.). |
+| `.log_internal_errors(bool)` | Whether to write `FormatEvent` internal errors to the writer. Default: `true`. |
 
   </Tab>
   <Tab title="Format style">
@@ -114,7 +116,7 @@ pub struct SubscriberBuilder<
 | Method | Type change | Description |
 |--------|-------------|-------------|
 | `.compact()` | `Format<Compact, T>` | Short, single-line output; fields appended to the event line. |
-| `.pretty()` | `Format<Pretty, T>` | Multi-line, human-readable output. Requires `ansi` feature. |
+| `.pretty()` | `Format<Pretty, T>` | Multi-line, human-readable output. Requires `ansi` feature for full color. |
 | `.json()` | `Format<Json, T>` | Newline-delimited JSON. Requires `json` feature. |
 
   </Tab>
@@ -132,7 +134,7 @@ Built-in timers in `fmt::time`:
 | `SystemTime` | Absolute wall-clock time (default). |
 | `Uptime` | Time elapsed since the subscriber was created. |
 | `UtcTime` | UTC time formatted via the `time` crate (requires `time` feature). |
-| `LocalTime` | Local time (requires `time` feature + `local-time` feature). |
+| `LocalTime` | Local time (requires `time` feature and `local-time` feature). |
 
   </Tab>
 </Tabs>
@@ -142,7 +144,8 @@ Built-in timers in `fmt::time`:
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `.with_max_level(filter)` | `-> SubscriberBuilder<N, E, LevelFilter, W>` | Set the maximum verbosity level. Accepts `Level` or `LevelFilter` values. |
-| `.with_env_filter(filter)` | `-> SubscriberBuilder<N, E, EnvFilter, W>` | Set an `EnvFilter` directive filter. Replaces any previously set filter. Requires `env-filter` feature. |
+| `.with_env_filter(filter)` | `-> SubscriberBuilder<N, E, EnvFilter, W>` | Set an `EnvFilter` directive filter. Requires `env-filter` feature. |
+| `.with_filter_reloading()` | `-> SubscriberBuilder<N, E, reload::Layer<EnvFilter, ...>, W>` | Wraps the current `EnvFilter` in a `reload::Layer` for runtime filter reloading. Requires `env-filter` feature. |
 
 ### Writer Methods
 
@@ -241,7 +244,13 @@ The `MakeWriter<'a>` trait abstracts over how a writable destination is obtained
 ```rust
 pub trait MakeWriter<'a> {
     type Writer: io::Write;
+
     fn make_writer(&'a self) -> Self::Writer;
+
+    // Optional override for metadata-aware writer selection:
+    fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
+        self.make_writer()
+    }
 }
 ```
 
@@ -319,7 +328,7 @@ fn main() {
         .pretty()
         .with_filter(LevelFilter::DEBUG);
 
-    // WARN and above for specific targets → JSON file
+    // WARN and above for specific targets → JSON stderr
     let file_layer = fmt::layer()
         .json()
         .with_writer(std::io::stderr)
@@ -338,5 +347,5 @@ fn main() {
 </Tabs>
 
 <Note>
-The `fmt` module requires the `fmt` and `std` feature flags (both enabled by default). JSON output requires the `json` feature. ANSI colors require the `ansi` feature. Time formatting with `UtcTime` or `LocalTime` requires the `time` feature.
+The `fmt` module requires the `fmt` and `std` feature flags (both enabled by default). JSON output requires the `json` feature. ANSI colors require the `ansi` feature. Time formatting with `UtcTime` or `LocalTime` requires the `time` feature. Runtime filter reloading requires the `env-filter` feature.
 </Note>

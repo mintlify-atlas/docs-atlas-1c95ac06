@@ -1,5 +1,5 @@
 ---
-title: "Event API Reference: Recording Moments in Tracing"
+title: "Event API Reference: Moments, Metadata, and Levels"
 sidebarTitle: "Event"
 description: "API reference for Event, the Visit trait, Metadata, and Level — the core types for recording and inspecting discrete observations in the tracing framework."
 ---
@@ -144,7 +144,7 @@ Override individual `record_*` methods to handle specific types efficiently. For
 </Tip>
 
 | Method | Rust type | Default behavior |
-|--------|-----------|-----------------|
+|--------|-----------|--------------------|
 | `record_f64` | `f64` | Forwards to `record_debug` |
 | `record_i64` | `i64` | Forwards to `record_debug` |
 | `record_u64` | `u64` | Forwards to `record_debug` |
@@ -152,9 +152,13 @@ Override individual `record_*` methods to handle specific types efficiently. For
 | `record_u128` | `u128` | Forwards to `record_debug` |
 | `record_bool` | `bool` | Forwards to `record_debug` |
 | `record_str` | `&str` | Forwards to `record_debug` |
-| `record_bytes` | `&[u8]` | Forwards to `record_debug` |
-| `record_error` | `&dyn Error` | Forwards to `record_debug` |
+| `record_bytes` | `&[u8]` | Formats as hex via `record_debug` |
+| `record_error` | `&dyn Error` | Forwards to `record_debug` (std only) |
 | `record_debug` | `&dyn fmt::Debug` | **Must be implemented** |
+
+<Note>
+`record_error` is only available when the Rust standard library is present, as it requires the `std::error::Error` trait. `record_bytes` formats the byte slice as a hex string by default.
+</Note>
 
 ```rust
 use tracing_core::field::{Visit, Field};
@@ -172,7 +176,7 @@ impl<'a> Visit for JsonVisitor<'a> {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.0.push_str(&format!(r#""{}":"{:?}","#, field.name(), value));
+        self.0.push_str(&format!(r#""{}":{:?},"#, field.name(), value));
     }
 }
 ```
@@ -243,7 +247,6 @@ fn print_metadata(meta: &Metadata<'_>) {
 ## `Level`
 
 ```rust
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Level(/* private */);
 ```
 
@@ -257,7 +260,7 @@ An enumeration of the five verbosity levels, ordered from most to least verbose:
 | `Level::WARN` | Low | Potentially harmful situations |
 | `Level::ERROR` | Lowest | Serious failures requiring attention |
 
-Levels implement `PartialOrd`/`Ord`: more verbose levels are _greater than_ less verbose ones.
+Levels implement `PartialOrd`/`Ord`: more verbose levels are _greater than_ less verbose ones (`Level::TRACE > Level::ERROR`).
 
 ```rust
 use tracing_core::Level;

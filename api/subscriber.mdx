@@ -147,7 +147,7 @@ Do **not** store a `Dispatch` directly inside a `Subscriber` — that creates a 
 fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest
 ```
 
-Called once per callsite the first time a span or event originating from that callsite is encountered. Returns an [`Interest`](#interest) value that allows the subscriber to cache its decision:
+Called once per callsite the first time a span or event originating from that callsite is encountered. Returns an [`Interest`](#the-interest-type) value that allows the subscriber to cache its decision:
 
 - `Interest::always()` — the callsite is always enabled; `enabled` will not be re-evaluated
 - `Interest::sometimes()` — `enabled` will be called on each occurrence

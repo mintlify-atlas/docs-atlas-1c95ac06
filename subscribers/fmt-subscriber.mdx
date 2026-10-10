@@ -1,14 +1,14 @@
 ---
-title: "Formatting Traces with the fmt Subscriber"
+title: "Formatting Traces with tracing-subscriber's fmt Subscriber"
 sidebarTitle: "fmt Subscriber"
-description: "Configure tracing-subscriber's fmt subscriber to print structured trace events as human-readable or JSON output in Rust."
+description: "Configure tracing-subscriber's fmt subscriber to print structured trace events as human-readable or JSON output to stdout, stderr, or any writer in Rust."
 ---
 
 The `tracing_subscriber::fmt` module provides a `Subscriber` implementation that formats trace events as line-oriented log output and writes them to a configurable sink. It is the most common starting point for adding observability to a Rust application: a single call sets up filtering via `RUST_LOG` and formatted output to stdout, while a rich builder API gives you fine-grained control over timestamps, log levels, thread information, output format, and destination.
 
 ## Quick Initialisation
 
-For the fastest possible setup, call `tracing_subscriber::fmt::init()`. This installs a global subscriber that reads the `RUST_LOG` environment variable to determine which spans and events to enable (via `EnvFilter`), and prints them to stdout in the default `Full` format:
+For the fastest possible setup, call `tracing_subscriber::fmt::init()`. This installs a global subscriber that reads the `RUST_LOG` environment variable to determine which spans and events to enable, and prints them to stdout in the default `Full` format:
 
 ```rust
 fn main() {
@@ -18,10 +18,10 @@ fn main() {
 }
 ```
 
-Run your binary with `RUST_LOG=debug cargo run` to see debug-level output. If `RUST_LOG` is not set, only `ERROR`-level events are shown by default.
+Run your binary with `RUST_LOG=debug cargo run` to see debug-level output. If `RUST_LOG` is not set, only `INFO`-level events (the default maximum level) are shown.
 
 <Note>
-`fmt::init()` is shorthand for `tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init()`. It requires the `env-filter` feature flag (enabled by default in most configurations).
+`fmt::init()` is a convenient shorthand that uses `RUST_LOG` for filtering when the `env-filter` feature is enabled, and falls back to `Targets`-based filtering otherwise. The `env-filter` feature is **not** enabled by default — add it to your `Cargo.toml` if you need full `EnvFilter` directive syntax.
 </Note>
 
 ## Builder API
@@ -60,7 +60,7 @@ fn main() {
 
 ## Output Formats
 
-The `fmt` subscriber ships with four built-in output formatters. Use the `<Tabs>` below to see how the same event looks in each format.
+The `fmt` subscriber ships with four built-in output formatters. Use the tabs below to see how the same event looks in each format.
 
 <Tabs>
   <Tab title="Full (default)">

@@ -17,7 +17,7 @@ Span macros return a [`Span`](/api/span) value. Spans are not entered automatica
 
 The generic span-creation macro. All level-specific span macros delegate to this one.
 
-```
+```text
 span!(level, name)
 span!(level, name, field = value, ...)
 span!(target: "my_target", level, name, field = value, ...)
@@ -67,7 +67,7 @@ let _enter = span.enter();
 
 Constructs a span at `Level::TRACE`. Equivalent to `span!(Level::TRACE, ...)`.
 
-```
+```text
 trace_span!(name)
 trace_span!(name, field = value, ...)
 trace_span!(target: "my_target", name, field = value, ...)
@@ -87,7 +87,7 @@ let _enter = span.enter();
 
 Constructs a span at `Level::DEBUG`. Equivalent to `span!(Level::DEBUG, ...)`.
 
-```
+```text
 debug_span!(name)
 debug_span!(name, field = value, ...)
 debug_span!(target: "my_target", name, field = value, ...)
@@ -109,7 +109,7 @@ span.in_scope(|| {
 
 Constructs a span at `Level::INFO`. Equivalent to `span!(Level::INFO, ...)`.
 
-```
+```text
 info_span!(name)
 info_span!(name, field = value, ...)
 info_span!(target: "my_target", name, field = value, ...)
@@ -129,7 +129,7 @@ async_handler(req).instrument(span).await;
 
 Constructs a span at `Level::WARN`. Equivalent to `span!(Level::WARN, ...)`.
 
-```
+```text
 warn_span!(name)
 warn_span!(name, field = value, ...)
 warn_span!(target: "my_target", name, field = value, ...)
@@ -149,7 +149,7 @@ let _guard = span.entered();
 
 Constructs a span at `Level::ERROR`. Equivalent to `span!(Level::ERROR, ...)`.
 
-```
+```text
 error_span!(name)
 error_span!(name, field = value, ...)
 error_span!(target: "my_target", name, field = value, ...)
@@ -176,7 +176,7 @@ Event macros immediately record a single point-in-time observation and dispatch 
 
 The generic event macro. All level-specific event macros delegate to this one.
 
-```
+```text
 event!(level, "message")
 event!(level, field = value, ..., "message")
 event!(level, field = value, ...)
@@ -206,7 +206,7 @@ event!(parent: &my_span, Level::DEBUG, "sub-operation complete");
 
 Emits an event at `Level::TRACE`. Equivalent to `event!(Level::TRACE, ...)`.
 
-```
+```text
 trace!("message")
 trace!(field = value, ..., "message")
 trace!(target: "my_target", field = value, ..., "message")
@@ -224,7 +224,7 @@ trace!(input = ?raw_bytes, "received data from socket");
 
 Emits an event at `Level::DEBUG`. Equivalent to `event!(Level::DEBUG, ...)`.
 
-```
+```text
 debug!("message")
 debug!(field = value, ..., "message")
 debug!(target: "my_target", field = value, ..., "message")
@@ -242,7 +242,7 @@ debug!(config = ?loaded_cfg, "configuration loaded");
 
 Emits an event at `Level::INFO`. Equivalent to `event!(Level::INFO, ...)`.
 
-```
+```text
 info!("message")
 info!(field = value, ..., "message")
 info!(target: "my_target", field = value, ..., "message")
@@ -260,7 +260,7 @@ info!(server_addr = %addr, "listening for connections");
 
 Emits an event at `Level::WARN`. Equivalent to `event!(Level::WARN, ...)`.
 
-```
+```text
 warn!("message")
 warn!(field = value, ..., "message")
 warn!(target: "my_target", field = value, ..., "message")
@@ -278,7 +278,7 @@ warn!(retries_left = 2, error = %err, "request failed, will retry");
 
 Emits an event at `Level::ERROR`. Equivalent to `event!(Level::ERROR, ...)`.
 
-```
+```text
 error!("message")
 error!(field = value, ..., "message")
 error!(target: "my_target", field = value, ..., "message")
@@ -322,7 +322,7 @@ These macros let you query the current subscriber before performing expensive wo
 
 Tests whether a span **or** event with the given level (and optional target / fields) would be recorded by the current subscriber. Returns `bool`.
 
-```
+```text
 enabled!(level) -> bool
 enabled!(level, field_name) -> bool
 enabled!(target: "my_target", level) -> bool
@@ -347,7 +347,7 @@ if enabled!(Level::DEBUG) {
 
 Like `enabled!`, but signals to the subscriber that the caller is checking for an **event** specifically (sets `Kind::EVENT` on the hint callsite). Returns `bool`.
 
-```
+```text
 event_enabled!(level) -> bool
 event_enabled!(level, field_name) -> bool
 event_enabled!(target: "my_target", level) -> bool
@@ -368,7 +368,7 @@ if event_enabled!(target: "audit", Level::INFO) {
 
 Like `enabled!`, but signals to the subscriber that the caller is checking for a **span** specifically (sets `Kind::SPAN` on the hint callsite). Returns `bool`.
 
-```
+```text
 span_enabled!(level) -> bool
 span_enabled!(level, field_name) -> bool
 span_enabled!(target: "my_target", level) -> bool
@@ -386,22 +386,33 @@ if span_enabled!(Level::INFO) {
 
 ---
 
-### `level_enabled!`
+### `record_all!`
 
-A lower-level macro that tests only the **static** maximum level configured at compile time via the `RUST_LOG` / Cargo feature flags. This is the first guard in all span and event macros and is the fastest possible check.
+Records multiple fields on an existing span in a single call. Accepts the same `key = value, ...` syntax as span creation macros, including `?key` (Debug) and `%key` (Display) sigils. All fields must have been declared (possibly with `field::Empty`) when the span was created.
 
-```
-level_enabled!(level) -> bool
+```text
+record_all!(span, field1 = value1, field2 = value2, ...)
+record_all!(span, ?field1, %field2 = expr, ...)
 ```
 
 ```rust
-use tracing::{level_enabled, Level};
+use tracing::{info_span, field, record_all};
 
-if level_enabled!(Level::TRACE) {
-    // This branch is compiled out entirely in release when
-    // the `max_level_release` feature is set below TRACE.
-}
+let span = info_span!(
+    "request",
+    request_id = field::Empty,
+    status     = field::Empty,
+    user       = field::Empty,
+).entered();
+
+// ... process request ...
+
+record_all!(span, request_id = req.id, status = 200i64, user = %req.user);
 ```
+
+<Tip>
+`record_all!` is more ergonomic than calling `span.record(...)` once per field when you have several values to record at the same point in time.
+</Tip>
 
   </Tab>
 </Tabs>

@@ -1,7 +1,7 @@
 ---
-title: "Filter API Reference for tracing-subscriber"
+title: "Filter API Reference for tracing-subscriber Layers"
 sidebarTitle: "Filter"
-description: "Comprehensive reference for tracing-subscriber's filtering APIs including EnvFilter, LevelFilter, Targets, FilterFn, and the per-layer Filter trait."
+description: "Filter types in tracing-subscriber: EnvFilter, LevelFilter, Targets, filter_fn, dynamic_filter_fn, and the per-layer Filter trait with method signatures."
 ---
 
 Filtering in `tracing-subscriber` determines which spans and events are collected and by whom. The library supports two complementary strategies: *global filtering*, where a `Layer` implementation votes on whether a span or event is enabled for the entire subscriber stack, and *per-layer filtering*, where individual layers are paired with a `Filter` that controls what that layer sees independently of all others. This page documents all of the filter types and traits provided by `tracing-subscriber`, from the low-level `Filter` trait to the powerful directive-based `EnvFilter`.
@@ -27,11 +27,25 @@ pub trait Filter<S> {
         // Default: true
     }
 
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>);
-    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>);
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>);
-    fn on_close(&self, id: span::Id, ctx: Context<'_, S>);
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        // Default: no-op
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        // Default: no-op
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        // Default: no-op
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        // Default: no-op
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        // Default: no-op
+    }
 }
 ```
 
@@ -39,10 +53,15 @@ pub trait Filter<S> {
 
 | Method | Description |
 |--------|-------------|
-| `enabled(meta, cx)` | Returns `true` if this filter enables the span or event described by `meta`. A `false` result disables the event **for the attached layer only**; other layers are unaffected. |
+| `enabled(meta, cx)` | Returns `true` if this filter enables the span or event described by `meta`. A `false` result disables the event **for the attached layer only**; other layers are unaffected. Note: `cx` is taken by shared reference (`&Context`). |
 | `callsite_enabled(meta)` | Returns an `Interest` indicating whether this filter will always, sometimes, or never be interested in a given callsite. Returning `always` or `never` allows the result to be cached. Defaults to `Interest::sometimes()`. |
 | `max_level_hint()` | Returns an optional hint for the highest verbosity level this filter will enable. Used to optimize callsite interest computation. |
-| `event_enabled(event, cx)` | Called before the filtered layer's `on_event` to allow field-based event filtering. Defaults to `true`. |
+| `event_enabled(event, cx)` | Called before the filtered layer's `on_event` to allow field-based event filtering. `cx` is taken by shared reference (`&Context`). Defaults to `true`. |
+| `on_new_span(attrs, id, ctx)` | Notifies the filter that a new span was constructed. Default: no-op. `ctx` is taken by value. |
+| `on_record(id, values, ctx)` | Notifies the filter that a span recorded additional field values. Default: no-op. |
+| `on_enter(id, ctx)` | Notifies the filter that a span was entered. Default: no-op. |
+| `on_exit(id, ctx)` | Notifies the filter that a span was exited. Default: no-op. |
+| `on_close(id, ctx)` | Notifies the filter that a span was closed. Default: no-op. |
 
 <Note>
 The `Filter` trait and per-layer filtering are only available when the `registry` and `std` feature flags are enabled. The `Registry` type is currently the only root subscriber that fully supports per-layer filters.
@@ -239,10 +258,19 @@ pub fn with_target(
 pub fn with_targets<T, L>(
     mut self,
     targets: impl IntoIterator<Item = (T, L)>,
-) -> Self;
+) -> Self
+where
+    T: Into<String>,
+    L: Into<LevelFilter>;
 
 // Set the default level for targets not matched by any prefix
 pub fn with_default(mut self, level: impl Into<LevelFilter>) -> Self;
+
+// Returns the default level, if one has been set
+pub fn default_level(&self) -> Option<LevelFilter>;
+
+// Returns whether a given target and level would be enabled
+pub fn would_enable(&self, target: &str, level: &Level) -> bool;
 ```
 
 ### Example
@@ -294,12 +322,29 @@ tracing_subscriber::registry()
     .init();
 ```
 
-For filters that need access to the current span context, use `DynFilterFn`:
+For filters that need access to the current span context, use `DynFilterFn` via `dynamic_filter_fn`:
 
 ```rust
 pub fn dynamic_filter_fn<S, F>(f: F) -> DynFilterFn<S, F>
 where
     F: Fn(&Metadata<'_>, &Context<'_, S>) -> bool;
+```
+
+```rust
+use tracing_subscriber::{filter::dynamic_filter_fn, prelude::*};
+
+let filter = dynamic_filter_fn(|metadata, ctx| {
+    // Only enable if inside a span named "important"
+    if let Some(current) = ctx.lookup_current() {
+        current.name() == "important"
+    } else {
+        *metadata.level() <= tracing::Level::WARN
+    }
+});
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer().with_filter(filter))
+    .init();
 ```
 
 ---

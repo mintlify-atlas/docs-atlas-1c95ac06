@@ -44,6 +44,18 @@ let e = error_span!("fatal_operation");
 
 Each is exactly equivalent to `span!(Level::TRACE, …)`, `span!(Level::DEBUG, …)`, and so on.
 
+### `Span::none()` — A No-Op Span
+
+`Span::none()` constructs a permanently disabled span. Entering, exiting, and recording values on it do nothing. This is useful as a sentinel value or when you need to conditionally disable tracing:
+
+```rust
+use tracing::Span;
+
+// A span that is always disabled — all operations on it are no-ops
+let span = Span::none();
+assert!(span.is_none());
+```
+
 ## Entering a Span
 
 Creating a span does **not** enter it — you must enter it explicitly. The most common approach is `span.enter()`, which returns an RAII guard that exits the span when it is dropped:
@@ -85,7 +97,7 @@ let span = span.entered();
 `Span::in_scope()` runs a closure inside the span and exits cleanly when the closure returns, making it ideal for wrapping synchronous code:
 
 ```rust
-use tracing::{info_span, Level};
+use tracing::info_span;
 
 let span = info_span!("json.parse");
 let result = span.in_scope(|| serde_json::from_slice(&buf));
@@ -100,7 +112,7 @@ In **async** code that uses `.await`, **do not** hold the guard returned by `Spa
 Fields attach structured data to a span. They use a `key = value` syntax after the span name:
 
 ```rust
-use tracing::{info_span, Level};
+use tracing::info_span;
 
 // Explicit key = value
 let span = info_span!("login", user = "ferris", attempt = 3);
@@ -234,6 +246,76 @@ span.record("result", result);
 <Note>
 Only fields that were declared when the span was created (either with a value or with `field::Empty`) can be recorded later. Calling `span.record()` for a field name that was never declared has no effect.
 </Note>
+
+## Causal Relationships — `follows_from`
+
+`Span::follows_from()` establishes an indirect causal relationship between two spans. This differs from parent–child: a span may follow from any number of prior spans and is not considered to be executing *inside* them. This models scenarios such as a future spawning several background tasks that all stem from the same logical cause:
+
+```rust
+use tracing::{span, Level, Span};
+
+let cause = span!(Level::INFO, "original_request");
+let effect = span!(Level::DEBUG, "background_task");
+
+// Declare that `effect` follows causally from `cause`
+effect.follows_from(&cause);
+
+// You can also follow from the current span
+let another = span!(Level::INFO, "another_task");
+another.follows_from(Span::current());
+```
+
+## Span Metadata and Identity
+
+Every enabled span carries metadata and a unique identifier that subscribers can use.
+
+### `Span::id()`
+
+Returns the span's `Id` if it is enabled. The `Id` uniquely identifies a span within the lifetime of a subscriber:
+
+```rust
+use tracing::{info_span, Span};
+
+let span = info_span!("my_span");
+if let Some(id) = span.id() {
+    println!("span id: {:?}", id);
+}
+```
+
+### `Span::metadata()`
+
+Returns the span's static `Metadata` — including its name, target, level, file, and line — if it is enabled:
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("my_span");
+if let Some(meta) = span.metadata() {
+    println!("span name: {}", meta.name());
+    println!("span target: {}", meta.target());
+    println!("span level: {}", meta.level());
+}
+```
+
+### `Span::is_disabled()` and `Span::is_none()`
+
+`is_disabled()` returns `true` when the subscriber has filtered out this span (or when the span was created via `Span::none()`). `is_none()` is more specific: it returns `true` only when the span was explicitly constructed by `Span::none()` and is entirely empty:
+
+```rust
+use tracing::{info_span, Span};
+
+let span = info_span!("my_span");
+
+// `is_disabled` is true if the subscriber filtered it out OR if it is Span::none()
+if span.is_disabled() {
+    println!("span will not be recorded");
+}
+
+// `is_none` is true ONLY for Span::none() — not for subscriber-disabled spans
+let noop = Span::none();
+assert!(noop.is_none());
+assert!(noop.is_disabled());
+```
 
 ## Closing Spans
 

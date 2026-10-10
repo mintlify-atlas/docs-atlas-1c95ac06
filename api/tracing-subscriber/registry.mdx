@@ -1,7 +1,7 @@
 ---
-title: "Registry API: Span Storage for tracing-subscriber"
+title: "Registry API: Span Storage and the LookupSpan Trait"
 sidebarTitle: "Registry"
-description: "The Registry struct is tracing-subscriber's default Subscriber and span store, exposing span data to composed layers via the LookupSpan trait."
+description: "Registry is tracing-subscriber's default Subscriber and span store. Layers access span data via LookupSpan, SpanRef, and a per-span typed Extensions map."
 ---
 
 The `Registry` is the recommended root `Subscriber` for most `tracing-subscriber` applications. Rather than formatting or recording spans itself, `Registry` focuses entirely on *storing* span data and *exposing* it to composed layers. When layers are stacked on top of a `Registry`, they can look up parent spans, walk the span ancestry, and attach their own private per-span data — all through a high-performance, lock-free concurrent data structure backed by a sharded slab. This separation of concerns means logging, metrics, distributed tracing, and per-layer filters can all share the same span storage without duplicating data or coordination logic.
@@ -62,6 +62,7 @@ pub trait LookupSpan<'a> {
 
     /// Registers a per-layer Filter and returns its FilterId.
     /// Called internally by Filtered layers; rarely called manually.
+    /// Panics if the subscriber does not support per-layer filtering.
     #[cfg(feature = "registry")]
     fn register_filter(&mut self) -> FilterId;
 }
@@ -105,10 +106,12 @@ pub struct SpanRef<'a, R: LookupSpan<'a>> {
 | `.fields()` | `&FieldSet` | Returns the set of fields defined at the span's callsite. |
 | `.parent()` | `Option<SpanRef<'a, R>>` | Returns a `SpanRef` for this span's parent, or `None` for root spans. |
 | `.scope()` | `Scope<'a, R>` | Returns an iterator over all ancestors, starting from this span (leaf → root). |
-| `.extensions()` | `Extensions<'_>` | Returns a read-only guard over the span's extension map. |
-| `.extensions_mut()` | `ExtensionsMut<'_>` | Returns a write guard over the span's extension map. |
+| `.extensions()` | `Extensions<'_>` | Returns a read-only guard over the span's extension map. Requires `std` feature. |
+| `.extensions_mut()` | `ExtensionsMut<'_>` | Returns a write guard over the span's extension map. Requires `std` feature. |
 
 ### Walking the Span Ancestry
+
+The `Scope` iterator returned by `.scope()` yields spans from leaf to root. Use `.from_root()` to reverse it:
 
 ```rust
 fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
@@ -128,7 +131,7 @@ fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
 
 ## `Extensions` and `ExtensionsMut`
 
-Each span stored in the `Registry` has an associated *extension map* — a type-indexed `HashMap` that layers use to attach their own private per-span data. Extensions are shared across all layers; use newtypes to avoid accidental cross-layer collisions.
+Each span stored in the `Registry` has an associated *extension map* — a type-indexed map that layers use to attach their own private per-span data. Extensions are shared across all layers; use newtypes to avoid accidental cross-layer collisions.
 
 ### `Extensions<'_>` — Read-Only Access
 
@@ -231,13 +234,14 @@ use tracing_subscriber::prelude::*;
 
 This brings in:
 
-| Trait | Purpose |
-|-------|---------|
-| `SubscriberExt` | Adds `.with(layer)` to any `Subscriber`. |
-| `SubscriberInitExt` | Adds `.init()` and `.try_init()` to any `Subscriber`. |
-| `Layer` (as `_`) | The layer trait itself (for blanket implementations). |
+| Export | Purpose |
+|--------|---------|
+| `SubscriberExt` (as `__tracing_subscriber_SubscriberExt`) | Adds `.with(layer)` to any `Subscriber`. |
+| `SubscriberInitExt` (as `_`) | Adds `.init()` and `.try_init()` to any `Subscriber`. |
+| `Layer` (as `__tracing_subscriber_Layer`) | The layer trait itself (for blanket implementations). |
+| `MakeWriterExt` (as `_`, `fmt` feature) | Combinator methods on `MakeWriter` implementations. |
 
-With the prelude, the full layer composition pattern becomes:
+The exports use long or underscore-prefixed names to avoid polluting the caller's namespace while still providing the trait methods. With the prelude, the full layer composition pattern becomes:
 
 ```rust
 use tracing_subscriber::prelude::*;

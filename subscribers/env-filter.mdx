@@ -1,7 +1,7 @@
 ---
-title: "Filtering Events at Runtime with EnvFilter"
+title: "Runtime Log Filtering with EnvFilter in tracing-subscriber"
 sidebarTitle: "EnvFilter"
-description: "Use tracing-subscriber's EnvFilter to control which spans and events are recorded at runtime using RUST_LOG directive syntax."
+description: "Use tracing-subscriber's EnvFilter to control which spans and events are recorded at runtime using RUST_LOG directive syntax, with no recompilation needed."
 ---
 
 `EnvFilter` gives you runtime control over which spans and events your application records, without recompiling. It parses a string of _directives_ — drawn from the `RUST_LOG` environment variable by default, or supplied programmatically — and evaluates each span and event against those directives before deciding whether to pass it downstream. This lets you dial logging verbosity up and down in production, enable detailed tracing for a single crate while silencing others, or even filter based on a span's field values.
@@ -58,7 +58,7 @@ Directives follow the pattern `target[span{field=value}]=level`. Every component
 
 Enables all spans and events at or below the specified verbosity level:
 
-```
+```text
 debug
 trace
 info
@@ -70,7 +70,7 @@ error
 
 Enables everything from a specific crate or module path (equivalent to `=trace`):
 
-```
+```text
 my_crate
 tokio::net
 h2
@@ -80,7 +80,7 @@ h2
 
 The most common pattern — enables all spans and events from a target up to a given level:
 
-```
+```text
 my_crate=debug
 tokio::net=info
 my_crate::module::submodule=trace
@@ -90,7 +90,7 @@ my_crate::module::submodule=trace
 
 Enables spans and events that occur within a named span, optionally scoped to a target:
 
-```
+```text
 my_crate[span_name]=trace
 [my_span]=debug
 ```
@@ -99,7 +99,7 @@ my_crate[span_name]=trace
 
 Enables spans that have a specific field name, or a field matching a particular value:
 
-```
+```text
 [span_name{field_name}]=debug
 [span_name{field_name="value"}]=trace
 [{request_id}]=trace
@@ -113,7 +113,7 @@ By default, string field values in directives are matched as [regular expression
 
 Separate multiple directives with commas. More specific directives take precedence over less specific ones:
 
-```
+```text
 warn,my_crate=debug,my_crate::noisy_module=error
 ```
 
@@ -121,7 +121,7 @@ This enables `WARN` globally, `DEBUG` for `my_crate`, and only `ERROR` for `my_c
 
 ### Complete Syntax Reference
 
-```
+```text
 target[span_name{field=value}]=level
 ```
 
@@ -200,6 +200,18 @@ let filter = EnvFilter::try_from_default_env()?
     .add_directive("my_crate::my_mod=debug".parse()?);
 ```
 
+### Using the Builder API
+
+`EnvFilter::builder()` provides a fluent builder for more advanced configuration, such as disabling regex matching for field values:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+let filter = EnvFilter::builder()
+    .with_regex(false)
+    .parse_lossy("my_crate=debug");
+```
+
 ## Using `EnvFilter` with the `fmt` Subscriber
 
 ### Via `with_env_filter`
@@ -254,7 +266,7 @@ tracing_subscriber::registry()
 ```
 
 <Tip>
-Per-layer filtering requires the `registry` feature flag (enabled by default). `EnvFilter` as a per-layer `Filter` is most useful when you want different verbosity levels for different output destinations — for example, verbose to a debug log file but only warnings to a metrics sink.
+Per-layer filtering requires the `registry` feature flag (enabled by default via the `fmt` feature). `EnvFilter` as a per-layer `Filter` is most useful when you want different verbosity levels for different output destinations — for example, verbose to a debug log file but only warnings to a metrics sink.
 </Tip>
 
 ## Feature Flag

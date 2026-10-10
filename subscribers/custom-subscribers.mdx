@@ -1,7 +1,7 @@
 ---
-title: "Writing Custom Subscribers and Layers"
+title: "Writing Custom tracing Subscribers and Layers in Rust"
 sidebarTitle: "Custom Subscribers"
-description: "Implement the Layer or Subscriber trait to route tracing data to custom sinks, metrics systems, or external observability backends."
+description: "Implement the Layer or Subscriber trait to route tracing data to custom sinks, metrics systems, or external observability backends in Rust applications."
 ---
 
 The built-in `fmt` subscriber and `EnvFilter` cover the most common use cases, but `tracing`'s real power lies in how easily you can hook into the instrumentation pipeline for custom purposes. You might want to count events as metrics, route spans to a distributed tracing backend, capture structured data for testing, or apply domain-specific logic before deciding whether to record an event. This guide walks through the two extension points available: the `Layer` trait for composable additions to an existing pipeline, and the `Subscriber` trait for full control over the collection strategy.
@@ -83,6 +83,20 @@ where
         let _ = (id, values);
     }
 
+    /// Called when a span records that it follows from another span.
+    fn on_follows_from(
+        &self,
+        _span: &span::Id,
+        _follows: &span::Id,
+        _ctx: Context<'_, S>,
+    ) {}
+
+    /// Called before `on_event` to determine if the event should be processed.
+    /// Return `false` to suppress the event for this layer only.
+    fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
+        true
+    }
+
     /// Called when a span is entered (execution moves into it).
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span not found");
@@ -112,8 +126,18 @@ where
             level, target, current.id()
         );
     }
+
+    /// Called when a span ID has been cloned and the subscriber returned a new ID.
+    fn on_id_change(
+        &self,
+        _old: &span::Id,
+        _new: &span::Id,
+        _ctx: Context<'_, S>,
+    ) {}
 }
 ```
+
+The full set of overridable `Layer` methods also includes `register_callsite` and `enabled` for global filtering, and `on_register_dispatch` / `on_layer` for lifecycle hooks. See the [`Layer` trait docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/layer/trait.Layer.html) for the complete reference.
 
 ## Accessing Span Data: `SpanRef` and `Extensions`
 

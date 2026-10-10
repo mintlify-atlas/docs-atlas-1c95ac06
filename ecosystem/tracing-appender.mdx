@@ -15,6 +15,10 @@ Add `tracing-appender` to your `Cargo.toml`:
 tracing-appender = "0.2"
 ```
 
+<Note>
+`tracing-appender` requires **rustc 1.63** or newer.
+</Note>
+
 ## Rolling File Appender
 
 The `rolling` module provides convenience functions and a `RollingFileAppender` struct for writing log output to files that rotate on a schedule. Each appender is configured with a directory, a filename prefix, and a `Rotation` policy.
@@ -26,6 +30,7 @@ The `rolling` module provides convenience functions and a `RollingFileAppender` 
 | `Rotation::MINUTELY` | `rolling::minutely(dir, prefix)` | `YYYY-MM-DD-HH-MM` |
 | `Rotation::HOURLY` | `rolling::hourly(dir, prefix)` | `YYYY-MM-DD-HH` |
 | `Rotation::DAILY` | `rolling::daily(dir, prefix)` | `YYYY-MM-DD` |
+| `Rotation::WEEKLY` | `rolling::weekly(dir, prefix)` | `YYYY-MM-DD` |
 | `Rotation::NEVER` | `rolling::never(dir, prefix)` | *(no suffix)* |
 
 For example, `rolling::hourly("/var/log/myapp", "server.log")` creates files named `/var/log/myapp/server.log.2024-01-15-03` and rotates to a new file at the start of each hour.
@@ -37,11 +42,27 @@ let file_appender = tracing_appender::rolling::hourly("/some/directory", "prefix
 // Daily rotation — new file at midnight
 let file_appender = tracing_appender::rolling::daily("/some/directory", "app.log");
 
+// Weekly rotation — new file at the start of each week
+let file_appender = tracing_appender::rolling::weekly("/some/directory", "app.log");
+
 // No rotation — single file for the lifetime of the process
 let file_appender = tracing_appender::rolling::never("/some/directory", "app.log");
 ```
 
 `RollingFileAppender` implements `std::io::Write`, so it can be passed directly to `tracing_subscriber::fmt().with_writer(...)` for blocking writes, or wrapped in a `NonBlocking` writer (see below).
+
+You can also construct a `RollingFileAppender` using its builder API:
+
+```rust
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+let file_appender = RollingFileAppender::builder()
+    .rotation(Rotation::HOURLY)
+    .filename_prefix("app")
+    .filename_suffix("log")
+    .build("/var/log/myapp")
+    .expect("failed to initialize rolling file appender");
+```
 
 ## Non-Blocking Writer
 

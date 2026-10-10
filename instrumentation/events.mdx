@@ -61,21 +61,6 @@ Here, `question.answer` and `question.tricky` are recorded as structured fields,
 
 In practice, `event!(Level::INFO, …)` is verbose. `tracing` provides five shorthand macros that have the level baked in:
 
-<CardGroup cols={2}>
-  <Card title="trace!" icon="magnifying-glass">
-    Lowest verbosity. Fine-grained execution details; typically disabled in production.
-  </Card>
-  <Card title="debug!" icon="bug">
-    Diagnostic information useful during development and troubleshooting.
-  </Card>
-  <Card title="info!" icon="circle-info">
-    General operational messages about normal program behavior.
-  </Card>
-  <Card title="warn!" icon="triangle-exclamation">
-    Potentially problematic situations that don't prevent execution.
-  </Card>
-</CardGroup>
-
 ```rust
 use tracing::{trace, debug, info, warn, error};
 
@@ -87,6 +72,14 @@ error!(code = 500, "internal server error");
 ```
 
 Each of these is exactly equivalent to calling `event!` with the corresponding `Level` constant.
+
+| Macro | Level | Typical Use |
+|-------|-------|-------------|
+| `trace!` | `TRACE` | Fine-grained execution details; typically disabled in production |
+| `debug!` | `DEBUG` | Diagnostic information useful during development and troubleshooting |
+| `info!` | `INFO` | General operational messages about normal program behavior |
+| `warn!` | `WARN` | Potentially problematic situations that don't prevent execution |
+| `error!` | `ERROR` | Failures that require attention or indicate incorrect behavior |
 
 ## Field Syntax
 

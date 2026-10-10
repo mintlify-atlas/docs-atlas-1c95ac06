@@ -58,6 +58,8 @@ await-holding-invalid-types = [
 ]
 ```
 
+Both `Entered` (returned by `Span::enter()`) and `EnteredSpan` (returned by `Span::entered()`) must be listed. The `Entered` guard borrows the span while `EnteredSpan` owns it, but both are `!Send` and both will produce incorrect traces if held across an `.await` point.
+
 ## The Correct Approach: `#[instrument]`
 
 <Tip>

@@ -1,7 +1,7 @@
 ---
-title: "Layer Trait API: Composable Subscriber Behaviors"
+title: "Layer Trait: Composable tracing-subscriber Behaviors"
 sidebarTitle: "Layer"
-description: "The Layer<S> trait in tracing-subscriber enables composable, stackable behaviors over a root Subscriber without owning span ID generation."
+description: "The Layer<S> trait in tracing-subscriber enables composable, stackable behaviors over a root Subscriber without owning span ID generation or global state."
 ---
 
 The `Layer` trait is the fundamental composability primitive in `tracing-subscriber`. Where a `Subscriber` represents a complete, self-contained strategy for collecting traces — including the authoritative generation of span IDs — a `Layer` represents the *composable subset* of that behavior. Any number of layers can observe events, react to span lifecycle hooks, and apply filters, all stacked on top of a single root `Subscriber`. This separation of concerns makes it straightforward to combine logging, metrics, distributed tracing, and filtering into a unified pipeline without writing a monolithic subscriber.
@@ -14,17 +14,20 @@ where
     S: Subscriber,
     Self: 'static,
 {
+    fn on_register_dispatch(&self, subscriber: &Dispatch);
+    fn on_layer(&mut self, subscriber: &mut S);
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest;
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool;
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
     fn on_record(&self, _span: &span::Id, _values: &span::Record<'_>, _ctx: Context<'_, S>);
     fn on_follows_from(&self, _span: &span::Id, _follows: &span::Id, _ctx: Context<'_, S>);
+    fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool;
     fn on_event(&self, _event: &Event<'_>, _ctx: Context<'_, S>);
     fn on_enter(&self, _id: &span::Id, _ctx: Context<'_, S>);
     fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>);
     fn on_close(&self, _id: span::Id, _ctx: Context<'_, S>);
     fn on_id_change(&self, _old: &span::Id, _new: &span::Id, _ctx: Context<'_, S>);
-    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool;
-    fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool;
-    // ...
+    // ..combinators and other methods..
 }
 ```
 
@@ -54,6 +57,15 @@ The type parameter `S` represents the root `Subscriber` that the layer is being 
 | `event_enabled(_event, _ctx)` | Called **before** `on_event` to decide whether to record this event. Returning `false` suppresses the call to `on_event` for this layer only. |
 
   </Tab>
+  <Tab title="Initialization">
+
+| Method | Called when |
+|--------|-------------|
+| `on_register_dispatch(&self, subscriber: &Dispatch)` | The layer is installed as part of a `Subscriber`. Use for late initialization; avoid storing the `Dispatch` directly (use `Dispatch::downgrade` to prevent cycles). |
+| `on_layer(&mut self, subscriber: &mut S)` | The layer is attached to a subscriber via `with_subscriber` or `SubscriberExt::with`. Both are passed mutably so the layer can call subscriber methods (e.g., `register_filter`). |
+| `register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest` | A new callsite is registered. Returns `Interest::always()` if `enabled` returns true, `Interest::never()` otherwise. Override for per-callsite setup. |
+
+  </Tab>
 </Tabs>
 
 ### Filtering Methods
@@ -71,7 +83,7 @@ fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool;
 ```
 
 <Warning>
-`enabled` and `event_enabled` on `Layer` determine whether a span or event is **globally** enabled for the whole subscriber. To filter only for an individual layer without affecting others, use the [`with_filter`](#with_filter) method to attach a per-layer `Filter` instead.
+`enabled` and `event_enabled` on `Layer` determine whether a span or event is **globally** enabled for the whole subscriber. To filter only for an individual layer without affecting others, use the [`with_filter`](#with_filter--per-layer-filtering) method to attach a per-layer `Filter` instead.
 </Warning>
 
 ## Composing Layers
@@ -123,9 +135,10 @@ where
 
 ### `Layer::boxed()`
 
-Erases the concrete type of a `Layer`, returning `Box<dyn Layer<S> + Send + Sync + 'static>`. This is essential when multiple branches of a `match` or `if` expression produce different layer types:
+Erases the concrete type of a `Layer`, returning `Box<dyn Layer<S> + Send + Sync + 'static>`. This is essential when multiple branches of a `match` or `if` expression produce different layer types. Requires the `alloc` or `std` feature.
 
 ```rust
+#[cfg(any(feature = "alloc", feature = "std"))]
 fn boxed(self) -> Box<dyn Layer<S> + Send + Sync + 'static>
 where
     Self: Sized + Layer<S> + Send + Sync + 'static,
@@ -182,6 +195,11 @@ Key methods on `Context`:
 | `ctx.span(id)` | `Option<SpanRef<'_, S>>` | Looks up stored data for the span with the given ID. Requires `S: LookupSpan`. |
 | `ctx.event_span(event)` | `Option<SpanRef<'_, S>>` | Returns the span that an event was recorded in (respects explicit parent overrides). Requires `S: LookupSpan`. |
 | `ctx.enabled(metadata)` | `bool` | Returns whether the wrapped subscriber would enable the given metadata. |
+| `ctx.event(event)` | `()` | Records the provided event with the wrapped subscriber directly. |
+| `ctx.exists(id)` | `bool` | Returns `true` if an active span exists for the given `Id`. Requires `S: LookupSpan`. |
+| `ctx.metadata(id)` | `Option<&'static Metadata<'static>>` | Returns the metadata for the span with the given ID. Requires `S: LookupSpan`. |
+| `ctx.span_scope(id)` | `Option<Scope<'_, S>>` | Returns an iterator from the given span to the root (leaf → root). Requires `S: LookupSpan`. |
+| `ctx.event_scope(event)` | `Option<Scope<'_, S>>` | Returns a scope iterator starting from the event's parent span. Requires `S: LookupSpan`. |
 
 ### Accessing the Registry from a Layer
 
@@ -220,7 +238,7 @@ where
     A vector of layers of the same type. All layers in the `Vec` receive every notification.
   </Card>
   <Card title="Identity" icon="circle-check">
-    A zero-overhead no-op layer useful as a placeholder or default.
+    A zero-overhead no-op layer useful as a placeholder or default. Construct with `Identity::new()`.
   </Card>
 </CardGroup>
 

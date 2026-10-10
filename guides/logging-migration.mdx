@@ -1,5 +1,5 @@
 ---
-title: "Migrating from log to tracing"
+title: "How to Migrate from the log Crate to tracing in Rust"
 sidebarTitle: "log Migration"
 description: "Learn how to migrate from the log crate to tracing, with strategies for full replacement, incremental bridging, and library compatibility."
 ---
@@ -220,7 +220,7 @@ tracing = { version = "0.1", features = ["log-always"] }
 ```rust
 // A complete minimal application using tracing
 use tracing::{debug, error, info, instrument, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[instrument]
 pub fn shave(yak: usize) -> Result<(), std::io::Error> {
@@ -236,7 +236,7 @@ pub fn shave(yak: usize) -> Result<(), std::io::Error> {
 
 fn main() {
     // Initialise a subscriber that reads RUST_LOG for filtering
-    fmt()
+    tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 

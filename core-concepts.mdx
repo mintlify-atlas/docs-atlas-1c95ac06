@@ -1,5 +1,5 @@
 ---
-title: "Core Concepts: Spans, Events, and Subscribers"
+title: "Core Concepts: Spans, Events, Subscribers, and Fields"
 sidebarTitle: "Core Concepts"
 description: "Learn tracing's core primitives: spans model durations, events mark moments, subscribers collect data, levels filter noise, and fields carry typed context."
 ---
@@ -37,7 +37,7 @@ let _guard = span.enter();
 
 A span goes through three phases:
 
-1. **Created** — `Span::new()` / `span!()` constructs the span and notifies the subscriber via `new_span()`.
+1. **Created** — `span!()` constructs the span and notifies the subscriber via `new_span()`.
 2. **Entered / Exited** — `span.enter()` notifies the subscriber via `enter()` and `exit()`. A span may be entered and exited many times.
 3. **Closed** — When the last `Span` handle is dropped the subscriber's `try_close()` is called and the span's data may be freed.
 
@@ -171,10 +171,11 @@ The core methods a `Subscriber` must implement (defined in `tracing-core`) are:
 |---|---|
 | `enabled(&self, metadata)` | A span or event is about to be created — return `false` to filter it out entirely |
 | `new_span(&self, attrs)` | A new span is constructed |
+| `record(&self, id, values)` | Fields are recorded on an existing span |
+| `record_follows_from(&self, id, follows)` | A causal relationship between two spans is declared |
+| `event(&self, event)` | An event is emitted |
 | `enter(&self, id)` | Execution enters a span |
 | `exit(&self, id)` | Execution exits a span |
-| `event(&self, event)` | An event is emitted |
-| `record(&self, id, values)` | Fields are recorded on an existing span |
 
 ```rust
 use tracing::{span::{Id, Attributes, Record}, Metadata, Event};
