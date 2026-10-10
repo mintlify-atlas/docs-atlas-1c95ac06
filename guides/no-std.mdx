@@ -1,0 +1,209 @@
+---
+title: "Using Tracing in no_std and Embedded Rust"
+sidebarTitle: "no_std Usage"
+description: "Configure tracing and tracing-core for no_std and embedded Rust targets, including which APIs are available without the standard library."
+---
+
+`tracing` and `tracing-core` both carry `#![no_std]` at the crate root, meaning they can be used in firmware, kernel modules, and other environments where the Rust standard library is unavailable. This guide explains how to configure your dependencies, which parts of the API remain available without `std`, and how to write a minimal subscriber for a bare-metal target.
+
+<Note>
+  Both `tracing` and `tracing-core` require `liballoc` even in `no_std` mode. Pure `no_alloc` environments (e.g. targets with no heap at all) are not currently supported.
+</Note>
+
+---
+
+## Which Crates Support no_std
+
+| Crate | no_std support | Requires alloc |
+|---|---|---|
+| `tracing-core` | ✅ Yes | ✅ Yes |
+| `tracing` | ✅ Yes | ✅ Yes |
+| `tracing-subscriber` | ⚠️ Partial (`alloc` feature) | ✅ Yes |
+| `tracing-log` | ❌ No (`std` required) | — |
+| `tracing-appender` | ❌ No (`std` required) | — |
+
+`tracing-core`'s source opens with `extern crate alloc;` and `#![no_std]`, confirming it is designed for allocation-capable embedded targets. `tracing` mirrors this: its `lib.rs` is annotated `#![no_std]` and gates standard-library usage behind `#[cfg(feature = "std")]`.
+
+---
+
+## Cargo.toml Configuration
+
+Disable default features for both crates. The `default` feature set for `tracing` includes `std` and `attributes`; for `tracing-core` it includes `std`.
+
+```toml
+[dependencies]
+tracing      = { version = "0.1", default-features = false }
+tracing-core = { version = "0.1", default-features = false }
+```
+
+If you want the `#[instrument]` attribute macro in a `no_std` context, you can re-enable only `attributes`:
+
+```toml
+[dependencies]
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+```
+
+---
+
+## What Is Available Without std
+
+With `default-features = false`, the following items remain fully functional:
+
+<CardGroup cols={2}>
+  <Card title="Macros" icon="terminal">
+    `span!`, `event!`, `trace!`, `debug!`, `info!`, `warn!`, `error!`,
+    `trace_span!`, `debug_span!`, `info_span!`, `warn_span!`, `error_span!`
+  </Card>
+  <Card title="Core types" icon="cube">
+    `Level`, `LevelFilter`, `Metadata`, `Event`, `Span`, `Field`, `FieldSet`,
+    `ValueSet`, `Dispatch`
+  </Card>
+  <Card title="Subscriber trait" icon="plug">
+    The `Subscriber` trait and all of its required methods. You can implement a
+    custom subscriber in a `no_std` crate.
+  </Card>
+  <Card title="Callsite registry" icon="list">
+    The global callsite registry that powers per-callsite interest caching still
+    works; it uses `alloc` internally via the `spin`-based `Once` primitive
+    vendored into `tracing-core`.
+  </Card>
+</CardGroup>
+
+---
+
+## What Requires std
+
+The following functionality is gated behind the `std` feature:
+
+- **`tracing_subscriber::fmt`** — formatted output to `stdout`/`stderr` requires I/O traits from `std`.
+- **`EnvFilter`** — reads the `RUST_LOG` environment variable; environment access requires `std`.
+- **File appenders** — `tracing_appender`'s rolling file writers depend on `std::fs`.
+- **`subscriber::with_default`** — thread-local subscriber overrides use `std::thread_local!`.
+- **`tracing_subscriber`'s `registry`** feature — uses `sharded-slab` and `thread_local`, both of which require `std`.
+
+---
+
+## The `alloc` Feature
+
+`tracing-subscriber` exposes an `alloc` feature that sits between full `std` support and a bare `no_std` build:
+
+```toml
+[dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["alloc"] }
+```
+
+With `alloc` enabled you gain access to the `Layer` combinator infrastructure and some formatting utilities without pulling in any `std`-only I/O. This is useful for targets that have a heap allocator (e.g. an RTOS with a custom allocator) but no OS-level file or thread primitives.
+
+---
+
+## Feature Flags Reference
+
+### `tracing` feature flags
+
+| Feature | Default | Description |
+|---|---|---|
+| `std` | ✅ Yes | Enables standard library support including `with_default` |
+| `attributes` | ✅ Yes | Enables the `#[instrument]` proc-macro attribute |
+| `log` | ❌ No | Emit `log` records when no tracing subscriber is active |
+| `log-always` | ❌ No | Always emit `log` records even with a subscriber set |
+| `valuable` | ❌ No | Record field values via the `valuable` crate (unstable) |
+
+### `tracing-core` feature flags
+
+| Feature | Default | Description |
+|---|---|---|
+| `std` | ✅ Yes | Enables `std::sync::Once` and other std primitives |
+| `valuable` | ❌ No | Support for the `valuable` crate (unstable) |
+
+### `tracing-subscriber` feature flags (no_std-relevant)
+
+| Feature | Default | Description |
+|---|---|---|
+| `std` | ✅ Yes | Enables all std-dependent functionality |
+| `alloc` | ✅ Yes (via std) | Enables alloc-only functionality without std |
+| `fmt` | ✅ Yes | Formatted subscriber (requires `std`) |
+| `env-filter` | ❌ No | `EnvFilter` (requires `std`) |
+| `registry` | ✅ Yes (via fmt) | Span registry (requires `std`) |
+
+---
+
+## Writing a Minimal no_std Subscriber
+
+The example below shows a complete, self-contained `no_std` subscriber that prints events to a platform-specific output (substituted here with a no-op). Adapt `platform_print` to your hardware's UART or semihosting interface.
+
+```rust
+#![no_std]
+
+extern crate alloc;
+
+use tracing_core::{
+    subscriber::Subscriber,
+    span::{Attributes, Id, Record},
+    Event, Metadata,
+};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// A minimal subscriber for no_std targets.
+pub struct MinimalSubscriber {
+    next_id: AtomicU64,
+}
+
+impl MinimalSubscriber {
+    pub const fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+        }
+    }
+}
+
+impl Subscriber for MinimalSubscriber {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // Accept everything at INFO level and above
+        metadata.level() <= &tracing_core::Level::INFO
+    }
+
+    fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        Id::from_u64(id)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        // In real code, replace this with a write to your UART or
+        // semihosting output. Here we simply reference the metadata.
+        let meta = event.metadata();
+        platform_print(meta.target(), meta.level().as_str());
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
+fn platform_print(_target: &str, _level: &str) {
+    // Replace with: cortex_m_semihosting::hprintln!("{} [{}]", target, level);
+}
+```
+
+Register it as the global default in your `#[entry]` or `main` function:
+
+```rust
+use tracing::subscriber::set_global_default;
+
+static SUBSCRIBER: MinimalSubscriber = MinimalSubscriber::new();
+
+#[entry]
+fn main() -> ! {
+    set_global_default(&SUBSCRIBER).expect("subscriber already set");
+
+    tracing::info!("system initialised");
+    loop {}
+}
+```
+
+<Note>
+  `set_global_default` is available in `no_std` builds because it only uses the `alloc`-backed callsite registry, not any `std::sync` primitives. The spin-based `Once` implementation vendored in `tracing-core` handles the single-initialisation guarantee on targets without `std`.
+</Note>

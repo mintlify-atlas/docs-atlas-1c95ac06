@@ -1,0 +1,311 @@
+---
+title: "Creating and Using Spans in Tracing"
+sidebarTitle: "Spans"
+description: "Learn how to create, enter, and manage spans in tracing — the primary unit of execution context representing a period of time in your program."
+---
+
+Spans are the core building block of `tracing`. Unlike a log message that captures a single moment, a span represents a *period of time* with a distinct beginning and end — modelling units of work like handling an HTTP request, querying a database, or any discrete section of execution. Spans can be nested to form a tree, giving you a full picture of your program's execution context at any point in time.
+
+## What Is a Span?
+
+A span encapsulates the context in which a section of code executes. It has:
+
+- A **name** — a static string identifying the span.
+- A **verbosity level** — controls whether the span is recorded (same levels as events: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`).
+- **Fields** — typed key-value pairs carrying structured data about the context.
+- A **parent** — the span that was active when this one was created (or an explicit override).
+
+A thread of execution *enters* a span when it starts executing in that context, and *exits* the span when it switches to another. The span in which a thread is currently executing is referred to as the **current span**.
+
+## Creating Spans
+
+Spans are created using the `span!` macro, which takes a level, a name string, and optional fields:
+
+```rust
+use tracing::{span, Level};
+
+// A span at INFO level named "my_span" with a single field "answer"
+let my_span = span!(Level::INFO, "my_span", answer = 42);
+```
+
+### Level-Specific Shorthand Macros
+
+Five convenience macros cover every verbosity level, removing the need to pass `Level` explicitly:
+
+```rust
+use tracing::{trace_span, debug_span, info_span, warn_span, error_span};
+
+let t = trace_span!("loading_config");
+let d = debug_span!("parse_request");
+let i = info_span!("handle_request", request_id = 7);
+let w = warn_span!("retry_attempt", attempt = 3);
+let e = error_span!("fatal_operation");
+```
+
+Each is exactly equivalent to `span!(Level::TRACE, …)`, `span!(Level::DEBUG, …)`, and so on.
+
+## Entering a Span
+
+Creating a span does **not** enter it — you must enter it explicitly. The most common approach is `span.enter()`, which returns an RAII guard that exits the span when it is dropped:
+
+```rust
+use tracing::{span, Level};
+
+let my_var: u64 = 5;
+let my_span = span!(Level::TRACE, "my_span", my_var);
+
+// `my_span` exists but has not been entered yet.
+
+// Enter `my_span` — returns a guard.
+let _enter = my_span.enter();
+
+// All code here executes inside `my_span`.
+// Dropping `_enter` exits the span.
+```
+
+### `entered()` — Owning Guard
+
+`Span::entered()` moves the span into the guard rather than borrowing it, allowing you to create and enter a span in a single expression:
+
+```rust
+use tracing::info_span;
+
+// Create and enter in one step.
+let span = info_span!("something_interesting").entered();
+
+// `span` can be explicitly exited to retrieve the underlying `Span`:
+let span = span.exit();
+
+// ...and re-entered later:
+let span = span.entered();
+```
+
+### `in_scope()` — Closure-Based Entry
+
+`Span::in_scope()` runs a closure inside the span and exits cleanly when the closure returns, making it ideal for wrapping synchronous code:
+
+```rust
+use tracing::{info_span, Level};
+
+let span = info_span!("json.parse");
+let result = span.in_scope(|| serde_json::from_slice(&buf));
+```
+
+<Warning>
+In **async** code that uses `.await`, **do not** hold the guard returned by `Span::enter()` across an await point. When the future yields, the runtime may switch to another task while the span is still "entered", producing incorrect traces. See [Tracing Async Code](/instrumentation/async-code) for safe alternatives.
+</Warning>
+
+## Span Fields
+
+Fields attach structured data to a span. They use a `key = value` syntax after the span name:
+
+```rust
+use tracing::{info_span, Level};
+
+// Explicit key = value
+let span = info_span!("login", user = "ferris", attempt = 3);
+```
+
+### Shorthand — Variable Name as Key
+
+When the field name matches a local variable, you can omit the `= value` part:
+
+```rust
+use tracing::{span, Level};
+
+let user = "ferris";
+
+// Equivalent to: span!(Level::TRACE, "login", user = user)
+let span = span!(Level::TRACE, "login", user);
+```
+
+### `?` — Debug Formatting
+
+Prefix a value with `?` to record it using its `fmt::Debug` implementation:
+
+```rust
+use tracing::event;
+use tracing::Level;
+
+#[derive(Debug)]
+struct Config { port: u16 }
+
+let cfg = Config { port: 8080 };
+
+// Records `cfg` using Debug
+event!(Level::INFO, config = ?cfg, "server starting");
+```
+
+### `%` — Display Formatting
+
+Prefix with `%` to use `fmt::Display` instead:
+
+```rust
+use tracing::info_span;
+
+let addr = std::net::IpAddr::from([127, 0, 0, 1]);
+
+// Records `addr` using Display
+let span = info_span!("connect", peer = %addr);
+```
+
+### `field::Empty` — Deferred Fields
+
+Declare a field without a value at creation time using `field::Empty`, then populate it later:
+
+```rust
+use tracing::{trace_span, field};
+
+let span = trace_span!(
+    "my_span",
+    greeting = "hello world",
+    parting = field::Empty  // value to be filled in later
+);
+
+// ...later in the code:
+span.record("parting", "goodbye world!");
+```
+
+## Nested Spans and Parent–Child Relationships
+
+Spans form a **tree**. When a new span is created, the currently active span automatically becomes its parent:
+
+```rust
+use tracing::{span, Level};
+
+span!(Level::INFO, "root").in_scope(|| {
+    // "outer_child" is a child of "root"
+    span!(Level::DEBUG, "outer_child").in_scope(|| {
+        // "inner_child" is a child of "outer_child"
+        span!(Level::TRACE, "inner_child").in_scope(|| {
+            // work happens here
+        });
+    });
+    // another span created here is also a child of "root"
+});
+```
+
+### Explicit Parent
+
+You can override the implicit parent with `parent:`:
+
+```rust
+use tracing::{span, Level};
+
+let foo = span!(Level::INFO, "foo");
+
+let bar = span!(Level::INFO, "bar");
+let _enter = bar.enter();
+
+// Even though "bar" is currently entered, "baz" will be a child of "foo"
+let baz = span!(parent: &foo, Level::INFO, "baz");
+```
+
+## Getting the Current Span
+
+`Span::current()` returns a handle to whatever span is currently active on this thread:
+
+```rust
+use tracing::Span;
+
+let current = Span::current();
+if current.is_none() {
+    // No span is active right now
+}
+```
+
+## Recording Fields After Creation
+
+Use `Span::record()` to set or update a field's value after the span has been created. This is useful when a value is not known until later in the function:
+
+```rust
+use tracing::{info_span, field};
+
+// Declare `result` as empty up front
+let span = info_span!("do_calculation", input_1 = 10, input_2 = 20, result = field::Empty);
+let _enter = span.enter();
+
+let result = 10 + 20;
+
+// Record the computed value
+span.record("result", result);
+```
+
+<Note>
+Only fields that were declared when the span was created (either with a value or with `field::Empty`) can be recorded later. Calling `span.record()` for a field name that was never declared has no effect.
+</Note>
+
+## Closing Spans
+
+A span is **closed** when all handles to it have been dropped. With RAII guards (`enter()` / `entered()`), this happens automatically when the guard goes out of scope:
+
+```rust
+use tracing::{span, Level};
+
+{
+    span!(Level::TRACE, "my_span").in_scope(|| {
+        // work inside the span
+    }); // span exited here
+
+    // The span handle is dropped — subscriber is notified
+}
+```
+
+You can also close a span explicitly by dropping the guard early:
+
+```rust
+use tracing::{info_span, info};
+
+let span = info_span!("my_great_span");
+
+{
+    let _enter = span.enter();
+    info!("i'm in the span!");
+    // guard drops here, span exits
+}
+
+// this event is outside the span
+info!("i'm outside the span!");
+```
+
+## Complete Example
+
+The following example from the `attrs-basic` example in the tracing repository shows spans and events working together in a realistic pattern:
+
+```rust
+use tracing::{debug, info, span, Level};
+use tracing_attributes::instrument;
+
+#[instrument]
+#[inline]
+fn suggest_band() -> String {
+    debug!("Suggesting a band.");
+    String::from("Wild Pink")
+}
+
+fn main() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("attrs_basic=trace")
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let num_recs = 1;
+
+        // Create a TRACE-level span with a Debug-formatted field
+        let span = span!(Level::TRACE, "get_band_rec", ?num_recs);
+        let _enter = span.enter();
+
+        let band = suggest_band();
+        info!(message = "Got a recommendation!", %band);
+    });
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Events" icon="bolt" href="/instrumentation/events">
+    Learn how to record point-in-time events within spans
+  </Card>
+  <Card title="#[instrument]" icon="tag" href="/instrumentation/instrument-macro">
+    Automatically instrument functions with the derive macro
+  </Card>
+</CardGroup>

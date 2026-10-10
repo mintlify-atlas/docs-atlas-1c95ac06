@@ -1,0 +1,286 @@
+---
+title: "Performance Tuning and Optimizing Tracing Overhead"
+sidebarTitle: "Performance"
+description: "Reduce tracing overhead with compile-time level filters, non-blocking writers, and best practices for span and field usage in production Rust applications."
+---
+
+`tracing` is designed to impose negligible overhead when instrumentation is disabled and low overhead when it is enabled. Understanding how the library achieves this — and which knobs to turn — lets you tune your application for production throughput without sacrificing diagnostic depth. This guide covers compile-time filtering, runtime filtering, non-blocking I/O, field formatting costs, and span placement best practices.
+
+---
+
+## How tracing Minimises Overhead
+
+Every `tracing` macro invocation expands into a check against a **callsite**, a static data structure that stores the span's or event's metadata (`Level`, target, field names, etc.). When the `tracing` dispatch machinery initialises, it asks each subscriber whether it is interested in each callsite. The result — `always`, `never`, or `sometimes` — is cached in an atomic integer inside the callsite.
+
+On subsequent invocations the macro reads that cached integer with a single atomic load. If the result is `never` (the interest is `Interest::never()`), the entire span or event body is skipped without any heap allocation or subscriber dispatch. This is the **callsite caching** mechanism that makes disabled instrumentation essentially free.
+
+```rust
+use tracing::{span, Level};
+
+// This span is created at a callsite registered once at program start.
+// If no subscriber is interested in TRACE-level events, the body never runs.
+let span = span!(Level::TRACE, "my_span");
+let _enter = span.enter();
+```
+
+All dispatch uses **static dispatch** through the `Subscriber` trait object stored in `tracing_core`'s per-thread `Dispatch`. There are no virtual dispatch chains per field, and format arguments are not evaluated unless the callsite is enabled.
+
+---
+
+## Level Filtering
+
+### Compile-Time Maximum Level
+
+The most aggressive optimisation is to compile out entire levels so that the disabled macros reduce to a literal no-op — not even an atomic load. Add one of the following feature flags to your `Cargo.toml`:
+
+```toml
+[dependencies]
+tracing = { version = "0.1", features = ["max_level_info"] }
+```
+
+Available compile-time level features:
+
+| Feature flag | Keeps levels | Compiles away |
+|---|---|---|
+| `max_level_off` | nothing | TRACE, DEBUG, INFO, WARN, ERROR |
+| `max_level_error` | ERROR | TRACE, DEBUG, INFO, WARN |
+| `max_level_warn` | ERROR, WARN | TRACE, DEBUG, INFO |
+| `max_level_info` | ERROR, WARN, INFO | TRACE, DEBUG |
+| `max_level_debug` | ERROR … DEBUG | TRACE |
+| `max_level_trace` | all | nothing |
+
+### Release-Profile Maximum Level
+
+You can apply a tighter filter specifically for release builds while keeping verbose output available in debug builds:
+
+```toml
+[dependencies]
+tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_info"] }
+```
+
+Available release-time level features:
+
+| Feature flag | Effect in `--release` builds |
+|---|---|
+| `release_max_level_off` | Remove all instrumentation |
+| `release_max_level_error` | Keep ERROR only |
+| `release_max_level_warn` | Keep ERROR, WARN |
+| `release_max_level_info` | Keep ERROR, WARN, INFO |
+| `release_max_level_debug` | Keep ERROR … DEBUG |
+| `release_max_level_trace` | Keep all (no compile-time removal) |
+
+<Tip>
+  For most production services, `release_max_level_info` is the right default. It removes all `debug!` and `trace!` call sites from the release binary — reducing binary size and eliminating their overhead entirely — while preserving the info/warn/error events you actually need to monitor health.
+</Tip>
+
+### How Compile-Time Filtering Works
+
+When a level feature is active, the corresponding macros expand to `()` — an empty expression. The Rust compiler sees a no-op with no side effects and removes the entire branch during optimisation. No atomic load, no format-string evaluation, no heap allocation.
+
+```rust
+// With `max_level_info` enabled, this compiles to nothing in release:
+tracing::debug!(request_id = 42, "cache miss"); // becomes ()
+```
+
+---
+
+## Runtime Filtering with EnvFilter
+
+`tracing_subscriber::EnvFilter` parses the `RUST_LOG` environment variable and filters spans and events at runtime. It supports per-target and per-module directives:
+
+```bash
+RUST_LOG=info,my_crate::db=debug,tower_http=warn cargo run
+```
+
+```toml
+[dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+`EnvFilter` uses a compiled regex automaton (via `regex-automata`) for target matching, making per-callsite checks fast. However, it still incurs overhead compared to compile-time removal because the filter predicate is evaluated at runtime for every callsite. Pair `EnvFilter` with compile-time level bounds to get the best of both worlds: `max_level_debug` removes TRACE entirely, and `EnvFilter` further refines which debug events are collected.
+
+---
+
+## Non-Blocking I/O
+
+Writing to a file or stdout on every event adds I/O latency directly to your application's hot path. The [`tracing-appender`](https://docs.rs/tracing-appender) crate provides `NonBlocking`, a writer that moves I/O to a dedicated background thread using a bounded channel.
+
+### Setup
+
+```toml
+[dependencies]
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+```
+
+```rust
+use tracing_appender::non_blocking;
+use tracing_subscriber::fmt;
+
+fn main() {
+    // Offload all writes to a background thread.
+    // `_guard` must be held for the duration of the program.
+    let (non_blocking_writer, _guard) = non_blocking(std::io::stdout());
+
+    fmt()
+        .with_writer(non_blocking_writer)
+        .init();
+
+    tracing::info!("logging is now non-blocking");
+    // _guard is dropped here, flushing any buffered output.
+}
+```
+
+### WorkerGuard and Flush Behaviour
+
+`non_blocking` returns a `(NonBlocking, WorkerGuard)` tuple. The `WorkerGuard`:
+
+- Keeps the background worker thread alive.
+- On drop, sends a shutdown signal and waits for the worker to flush all buffered messages before joining.
+- **Must** be bound to a named variable (not `_`) in `main` so it lives until the program exits.
+
+```rust
+// ✅ Correct — guard lives until end of main
+let (writer, _guard) = tracing_appender::non_blocking(std::io::stdout());
+
+// ❌ Wrong — guard is dropped immediately, flushing is not guaranteed
+let (writer, _) = tracing_appender::non_blocking(std::io::stdout());
+```
+
+<Note>
+  By default `NonBlocking` operates in **lossy mode**: if the internal channel (default capacity: 128,000 lines) fills up, additional log lines are silently dropped until capacity is available. This prioritises application throughput over log completeness. You can switch to backpressure mode using `NonBlockingBuilder`:
+
+  ```rust
+  let (non_blocking_writer, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+      .lossy(false)
+      .finish(std::io::stdout());
+  ```
+
+  With `lossy(false)`, the event macro will block its calling thread rather than dropping the record. Use this only when log completeness is more important than consistent latency.
+</Note>
+
+---
+
+## Avoid Expensive Field Formatting
+
+`tracing` supports three ways to record a value:
+
+| Syntax | Trait used | Cost |
+|---|---|---|
+| `field = value` | `tracing::Value` (primitives, `&str`, `&[u8]`) | Very low |
+| `field = %value` | `fmt::Display` | Medium (formatting on every event) |
+| `field = ?value` | `fmt::Debug` | Medium (formatting on every event) |
+
+Debug and Display formatting allocates a string on every event. For high-frequency paths, prefer recording primitive values or pre-formatted strings:
+
+```rust
+// Prefer: record the integer directly
+tracing::info!(status_code = 200u16, "request complete");
+
+// Avoid in tight loops: Debug formatting runs every time
+tracing::info!(response = ?body, "request complete"); // [!code --]
+
+// Better: only format when needed at the subscriber level
+tracing::info!(response_len = body.len(), "request complete"); // [!code ++]
+```
+
+When you do need to record a `Debug` or `Display` value, consider computing it once and binding it before the macro call, so the cost is clear at the call site.
+
+---
+
+## Span Overhead
+
+Spans are cheap to create and enter, but they are not free. Creating a span involves:
+
+1. An atomic load to check callsite interest.
+2. If enabled: allocating a span record in the subscriber's registry.
+3. On enter: updating the per-thread current-span stack.
+4. On exit/drop: decrementing a reference count and potentially freeing the record.
+
+The `tracing` benchmark suite (in `tracing/benches/`) quantifies this cost directly:
+
+| Benchmark | What it measures |
+|---|---|
+| `baseline` | Atomic load + `log` crate comparison baseline |
+| `empty_span` | Creating a `Span::none()` (disabled span) |
+| `enter_span` | Entering and exiting an enabled span |
+| `event` | Recording a single `info!` event |
+| `span_fields` | Creating a span with four fields (`foo`, `bar`, `baz`, `quuux`) |
+| `span_no_fields` | Creating a span with no fields |
+| `span_repeated` | Creating 100 spans in a loop (`span_repeated` benchmark) |
+
+Run them yourself with:
+
+```bash
+cargo bench -p tracing
+```
+
+### Guidance for Tight Loops
+
+Avoid creating a new span on every iteration of a hot loop. Instead, create the span before the loop and re-enter it per iteration, or create it once and use `in_scope`:
+
+```rust
+use tracing::{info_span, Level, span};
+
+// ❌ Avoid: new span allocation on every iteration
+for item in items {
+    let _span = span!(Level::DEBUG, "process_item", id = item.id).entered(); // [!code --]
+    process(item);
+}
+
+// ✅ Prefer: one span, entered and exited per iteration
+let span = span!(Level::DEBUG, "process_items", count = items.len());
+for item in items {
+    let _enter = span.enter(); // [!code ++]
+    process(item);
+} // span is exited when _enter drops each iteration
+```
+
+If you need per-item spans for distributed tracing or detailed timing, the cost is acceptable; the guidance above applies when minimising overhead is the primary concern.
+
+---
+
+## Putting It All Together
+
+A production-ready subscriber configuration combining compile-time level filtering, `EnvFilter`, and non-blocking writes:
+
+```toml
+[dependencies]
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+```
+
+```rust
+use tracing_appender::non_blocking;
+use tracing_subscriber::{fmt, EnvFilter};
+
+fn main() {
+    let (writer, _guard) = non_blocking(std::io::stdout());
+
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_writer(writer)
+        .init();
+
+    tracing::info!("application started");
+}
+```
+
+This configuration:
+
+- Removes all `debug!` and `trace!` call sites from the release binary via `release_max_level_info`.
+- Applies runtime `RUST_LOG` filtering without blocking the calling thread.
+- Offloads I/O to a background thread via `NonBlocking`.
+- Falls back to `info` level if `RUST_LOG` is not set.

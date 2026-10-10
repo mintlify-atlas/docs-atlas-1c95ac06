@@ -1,0 +1,342 @@
+---
+title: "The Subscriber Trait: Implementing Trace Collectors"
+sidebarTitle: "Subscriber"
+description: "Complete reference for the Subscriber trait, required and optional methods, installing subscribers globally or per-thread, and the NoSubscriber no-op type."
+---
+
+A `Subscriber` is the consumer of all tracing data in a program. It receives notifications about span lifecycle events (creation, entry, exit, closure) and individual event recordings, and is free to store, forward, filter, or discard that data in any way it chooses. The `Subscriber` trait is defined in `tracing-core` and re-exported from the `tracing` crate — libraries that implement subscribers should depend on `tracing-core` to avoid pulling in unnecessary dependencies.
+
+Only one subscriber is active at a time per thread (the _default subscriber_), though the `tracing-subscriber` crate provides a `Layer` system for composing multiple processing stages on top of a single underlying `Subscriber`.
+
+---
+
+## The `Subscriber` Trait
+
+```rust
+pub trait Subscriber: 'static { ... }
+```
+
+### Required Methods
+
+These methods have no default implementation and **must** be provided by every `Subscriber`.
+
+---
+
+#### `enabled`
+
+```rust
+fn enabled(&self, metadata: &Metadata<'_>) -> bool
+```
+
+Returns `true` if a span or event with the given metadata should be recorded. This is called by the default `register_callsite` implementation; if you override `register_callsite` to return `Interest::always()` or `Interest::never()`, `enabled` may be called less frequently.
+
+```rust
+fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+    // Only record INFO and above
+    metadata.level() <= &tracing::Level::INFO
+}
+```
+
+---
+
+#### `new_span`
+
+```rust
+fn new_span(&self, span: &span::Attributes<'_>) -> span::Id
+```
+
+Called when a new span is created. The subscriber receives the span's [`Attributes`], which contain the static [`Metadata`](/api/event#metadata) and any field values provided at creation time. The subscriber must return a unique `Id` for this span; IDs need only be unique within the subscriber's scope.
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn new_span(&self, span: &span::Attributes<'_>) -> span::Id {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    // Optionally store span.metadata() and field values
+    span::Id::from_u64(id)
+}
+```
+
+---
+
+#### `record`
+
+```rust
+fn record(&self, span: &span::Id, values: &span::Record<'_>)
+```
+
+Called when additional field values are recorded on an existing span (e.g., after `span.record("field", value)`). The subscriber may pass a [`Visit`](/api/event#the-visit-trait) implementation to `values.record(visitor)` to inspect the new values.
+
+---
+
+#### `record_follows_from`
+
+```rust
+fn record_follows_from(&self, span: &span::Id, follows: &span::Id)
+```
+
+Called when `span.follows_from(other)` is invoked, indicating a causal relationship between two spans. The subscriber may record this relationship in its storage. If the IDs do not correspond to known spans, or the relationship would create a cycle, the subscriber may silently ignore the call.
+
+---
+
+#### `event`
+
+```rust
+fn event(&self, event: &Event<'_>)
+```
+
+Called when an event is emitted by instrumentation code (e.g., via the `info!` macro). The subscriber receives the full [`Event`](/api/event#event-a), which exposes both metadata and field values via a visitor.
+
+```rust
+fn event(&self, event: &Event<'_>) {
+    let meta = event.metadata();
+    print!("[{}] {}", meta.level(), meta.target());
+    event.record(&mut MyVisitor);
+}
+```
+
+---
+
+#### `enter`
+
+```rust
+fn enter(&self, span: &span::Id)
+```
+
+Called when a span is entered (i.e., when `Span::enter`, `Span::entered`, or the `Entered` guard is created). The subscriber should update any current-span tracking it maintains.
+
+---
+
+#### `exit`
+
+```rust
+fn exit(&self, span: &span::Id)
+```
+
+Called when a span is exited (i.e., when the `Entered` or `EnteredSpan` guard is dropped). Exiting a span does not mean it is closed — the span may be re-entered later. The subscriber should update its current-span tracking accordingly.
+
+---
+
+### Optional Methods (with defaults)
+
+These methods have sensible default implementations and may be overridden for additional functionality.
+
+---
+
+#### `on_register_dispatch`
+
+```rust
+fn on_register_dispatch(&self, subscriber: &Dispatch) {
+    let _ = subscriber;
+}
+```
+
+Called once when the subscriber is first wrapped in a `Dispatch`. Useful for obtaining a `WeakDispatch` handle that allows the subscriber to refer back to its own dispatch without creating a reference-count cycle.
+
+<Warning>
+Do **not** store a `Dispatch` directly inside a `Subscriber` — that creates a reference-count cycle preventing the `Dispatch` from ever being dropped. Instead, call `subscriber.downgrade()` here to obtain a `WeakDispatch`.
+</Warning>
+
+---
+
+#### `register_callsite`
+
+```rust
+fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest
+```
+
+Called once per callsite the first time a span or event originating from that callsite is encountered. Returns an [`Interest`](#interest) value that allows the subscriber to cache its decision:
+
+- `Interest::always()` — the callsite is always enabled; `enabled` will not be re-evaluated
+- `Interest::sometimes()` — `enabled` will be called on each occurrence
+- `Interest::never()` — the callsite is disabled unless another subscriber is interested
+
+The default implementation delegates to `enabled` and returns `always` or `never` accordingly.
+
+---
+
+#### `event_enabled`
+
+```rust
+fn event_enabled(&self, event: &Event<'_>) -> bool {
+    true
+}
+```
+
+Called immediately before `event`. When this returns `false`, `event` is not called. Use this to perform efficient field-value-based filtering without the full cost of the `event` implementation.
+
+---
+
+#### `max_level_hint`
+
+```rust
+fn max_level_hint(&self) -> Option<LevelFilter> {
+    None
+}
+```
+
+Returns the most verbose `LevelFilter` that this subscriber will ever enable. When provided, the callsite registry uses this as a fast pre-filter — events and spans above the maximum level are skipped before `enabled` is ever called, which can significantly reduce overhead in production.
+
+```rust
+fn max_level_hint(&self) -> Option<LevelFilter> {
+    Some(tracing_core::LevelFilter::INFO)
+}
+```
+
+---
+
+#### `clone_span`
+
+```rust
+fn clone_span(&self, id: &span::Id) -> span::Id {
+    id.clone()
+}
+```
+
+Called every time a `Span` handle is cloned. The default implementation simply clones the ID. Override this alongside `try_close` to implement reference counting, enabling the subscriber to know precisely when a span will no longer be entered.
+
+---
+
+#### `try_close`
+
+```rust
+fn try_close(&self, id: span::Id) -> bool {
+    false
+}
+```
+
+Called when a `Span` handle is dropped. Should return `true` if there are now zero remaining handles capable of entering the span — i.e., the span is now permanently closed and storage can be freed. The default calls the deprecated `drop_span` and returns `false`.
+
+Subscribers that track reference counts should implement this method rather than `drop_span`.
+
+```rust
+fn try_close(&self, id: span::Id) -> bool {
+    let count = self.ref_counts.remove(&id);
+    count == 0
+}
+```
+
+---
+
+#### `drop_span` _(deprecated)_
+
+```rust
+#[deprecated(since = "0.1.2", note = "use `Subscriber::try_close` instead")]
+fn drop_span(&self, _id: span::Id) {}
+```
+
+Superseded by `try_close`. Using `drop_span` in subscribers composed with `tracing-subscriber` layers may prevent those layers from observing span close events.
+
+---
+
+#### `current_span`
+
+```rust
+fn current_span(&self) -> span::Current {
+    span::Current::unknown()
+}
+```
+
+Returns a representation of the span currently executing on this thread. Override to return `span::Current::new(id, metadata)` when inside a span, or `span::Current::none()` when not. Used by `Span::current()`.
+
+---
+
+### The `Interest` Type
+
+```rust
+pub struct Interest(/* private */);
+```
+
+Returned by `register_callsite` to influence how aggressively the callsite registry caches filtering decisions.
+
+| Constructor | Meaning |
+|-------------|---------|
+| `Interest::always()` | Never re-evaluate; always dispatch |
+| `Interest::sometimes()` | Re-evaluate on every occurrence |
+| `Interest::never()` | Never dispatch (unless overridden by another subscriber) |
+
+---
+
+## Installing a Subscriber
+
+### `set_global_default`
+
+```rust
+pub fn set_global_default<S>(subscriber: S) -> Result<(), SetGlobalDefaultError>
+where
+    S: Subscriber + Send + Sync + 'static,
+```
+
+Sets the subscriber as the global default for **all threads** for the lifetime of the process. Can only be called once — subsequent calls return `Err(SetGlobalDefaultError)`. Prefer this for application binaries.
+
+```rust
+use tracing::subscriber;
+
+let my_subscriber = MySubscriber::new();
+subscriber::set_global_default(my_subscriber)
+    .expect("global subscriber already set");
+```
+
+<Warning>
+Libraries should **not** call `set_global_default`. Doing so prevents applications that use the library from setting their own subscriber and will cause conflicts.
+</Warning>
+
+---
+
+### `with_default`
+
+```rust
+pub fn with_default<T, S>(subscriber: S, f: impl FnOnce() -> T) -> T
+where
+    S: Subscriber + Send + Sync + 'static,
+```
+
+Sets the subscriber as the default for the **current thread** for the duration of the closure `f`. The previous default is restored when the closure returns or panics. Thread-local only — spawned threads do not inherit this setting.
+
+```rust
+use tracing::subscriber;
+
+let result = subscriber::with_default(MySubscriber::new(), || {
+    // all tracing within this block routes to MySubscriber
+    do_work()
+});
+```
+
+---
+
+### `set_default`
+
+```rust
+pub fn set_default<S>(subscriber: S) -> DefaultGuard
+where
+    S: Subscriber + Send + Sync + 'static,
+```
+
+Sets the subscriber as the default for the **current thread** for the lifetime of the returned `DefaultGuard`. Dropping the guard restores the previous default. Useful when you need finer control over the lifetime than a closure provides.
+
+```rust
+use tracing::subscriber;
+
+let _guard = subscriber::set_default(MySubscriber::new());
+// MySubscriber is active until _guard is dropped
+```
+
+---
+
+## `NoSubscriber`
+
+```rust
+#[derive(Copy, Clone, Debug, Default)]
+pub struct NoSubscriber(());
+```
+
+A zero-cost no-op `Subscriber` that is never interested in any callsite, discards all spans and events, and always returns `false` from `enabled`. This is the default subscriber before any other subscriber has been installed.
+
+```rust
+use tracing_core::subscriber::NoSubscriber;
+use tracing::Dispatch;
+
+let noop = Dispatch::new(NoSubscriber::default());
+```

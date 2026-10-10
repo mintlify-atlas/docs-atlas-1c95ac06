@@ -1,0 +1,279 @@
+---
+title: "Layer Trait API: Composable Subscriber Behaviors"
+sidebarTitle: "Layer"
+description: "The Layer<S> trait in tracing-subscriber enables composable, stackable behaviors over a root Subscriber without owning span ID generation."
+---
+
+The `Layer` trait is the fundamental composability primitive in `tracing-subscriber`. Where a `Subscriber` represents a complete, self-contained strategy for collecting traces — including the authoritative generation of span IDs — a `Layer` represents the *composable subset* of that behavior. Any number of layers can observe events, react to span lifecycle hooks, and apply filters, all stacked on top of a single root `Subscriber`. This separation of concerns makes it straightforward to combine logging, metrics, distributed tracing, and filtering into a unified pipeline without writing a monolithic subscriber.
+
+## The `Layer<S>` Trait
+
+```rust
+pub trait Layer<S>
+where
+    S: Subscriber,
+    Self: 'static,
+{
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
+    fn on_record(&self, _span: &span::Id, _values: &span::Record<'_>, _ctx: Context<'_, S>);
+    fn on_follows_from(&self, _span: &span::Id, _follows: &span::Id, _ctx: Context<'_, S>);
+    fn on_event(&self, _event: &Event<'_>, _ctx: Context<'_, S>);
+    fn on_enter(&self, _id: &span::Id, _ctx: Context<'_, S>);
+    fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>);
+    fn on_close(&self, _id: span::Id, _ctx: Context<'_, S>);
+    fn on_id_change(&self, _old: &span::Id, _new: &span::Id, _ctx: Context<'_, S>);
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool;
+    fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool;
+    // ...
+}
+```
+
+The type parameter `S` represents the root `Subscriber` that the layer is being composed with. All methods have default no-op implementations, so you only need to override the hooks relevant to your use case.
+
+## Lifecycle Methods
+
+<Tabs>
+  <Tab title="Span lifecycle">
+
+| Method | Called when |
+|--------|-------------|
+| `on_new_span(attrs, id, ctx)` | A new span is constructed with the given `Attributes` and assigned `Id`. |
+| `on_record(_span, _values, _ctx)` | A span with the given `Id` records additional field values. |
+| `on_follows_from(_span, _follows, _ctx)` | A span declares that it follows causally from another span. |
+| `on_enter(_id, _ctx)` | A span with the given `Id` is entered by the current thread. |
+| `on_exit(_id, _ctx)` | The current thread exits the span with the given `Id`. |
+| `on_close(_id, _ctx)` | The span with the given `Id` is closed (all references dropped). |
+| `on_id_change(_old, _new, _ctx)` | A span's `Id` has been cloned and the subscriber returned a new `Id`. |
+
+  </Tab>
+  <Tab title="Event lifecycle">
+
+| Method | Called when |
+|--------|-------------|
+| `on_event(_event, _ctx)` | A `tracing` event is emitted in the current context. |
+| `event_enabled(_event, _ctx)` | Called **before** `on_event` to decide whether to record this event. Returning `false` suppresses the call to `on_event` for this layer only. |
+
+  </Tab>
+</Tabs>
+
+### Filtering Methods
+
+Two methods on `Layer` participate in *global* filtering — they affect whether a span or event is enabled for the **entire subscriber stack**, not just for this layer:
+
+```rust
+// Globally enables or disables a callsite.
+// Default: returns true (always enabled).
+fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool;
+
+// Called before on_event; globally gates event processing.
+// Default: returns true.
+fn event_enabled(&self, _event: &Event<'_>, _ctx: Context<'_, S>) -> bool;
+```
+
+<Warning>
+`enabled` and `event_enabled` on `Layer` determine whether a span or event is **globally** enabled for the whole subscriber. To filter only for an individual layer without affecting others, use the [`with_filter`](#with_filter) method to attach a per-layer `Filter` instead.
+</Warning>
+
+## Composing Layers
+
+### `SubscriberExt::with(layer)`
+
+The idiomatic way to attach a `Layer` to a `Subscriber` is through the extension trait `SubscriberExt`, brought into scope via the prelude:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+fn with<L>(self, layer: L) -> Layered<L, Self>
+where
+    L: Layer<Self>,
+    Self: Sized;
+```
+
+Example — composing multiple layers onto a `Registry`:
+
+```rust
+use tracing_subscriber::{Registry, prelude::*};
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(my_metrics_layer)
+    .init();
+```
+
+### `Layer::and_then(layer)`
+
+Composes two `Layer`s into a single `Layered` layer without attaching to a subscriber yet. This is useful when you want to apply a shared per-layer filter to multiple layers at once:
+
+```rust
+fn and_then<L>(self, layer: L) -> Layered<L, Self, S>
+where
+    L: Layer<S>,
+    Self: Sized;
+```
+
+### `Layer::with_subscriber(subscriber)`
+
+Low-level method that wraps a `Subscriber` with this layer, producing a `Layered` struct implementing `Subscriber`. Prefer `SubscriberExt::with` in most code.
+
+```rust
+fn with_subscriber(mut self, mut inner: S) -> Layered<Self, S>
+where
+    Self: Sized;
+```
+
+### `Layer::boxed()`
+
+Erases the concrete type of a `Layer`, returning `Box<dyn Layer<S> + Send + Sync + 'static>`. This is essential when multiple branches of a `match` or `if` expression produce different layer types:
+
+```rust
+fn boxed(self) -> Box<dyn Layer<S> + Send + Sync + 'static>
+where
+    Self: Sized + Layer<S> + Send + Sync + 'static,
+    S: Subscriber;
+```
+
+## `with_filter` — Per-Layer Filtering
+
+The `with_filter` method attaches a `Filter` to a layer, producing a `Filtered<Self, F, S>` that implements `Layer`. Only spans and events enabled by the filter reach the wrapped layer; other layers are unaffected.
+
+```rust
+#[cfg(all(feature = "registry", feature = "std"))]
+fn with_filter<F>(self, filter: F) -> filter::Filtered<Self, F, S>
+where
+    Self: Sized,
+    F: Filter<S>;
+```
+
+```rust
+use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
+
+tracing_subscriber::registry()
+    .with(fmt::layer().pretty().with_filter(LevelFilter::INFO))
+    .with(fmt::layer().json().with_filter(LevelFilter::WARN))
+    .init();
+```
+
+<Note>
+Per-layer filtering (`with_filter`) requires the `registry` and `std` feature flags and is only fully supported when `Registry` is the root subscriber.
+</Note>
+
+## `Layered<L, S>` Type
+
+```rust
+pub struct Layered<L, S, ...> { /* ... */ }
+```
+
+`Layered` is the concrete struct returned by `and_then` and `with_subscriber`. It implements both `Layer<S>` (when `S` itself is a `Subscriber`) and `Subscriber` (when the inner type is a `Subscriber`), making it possible to chain arbitrarily many layers into a single subscriber.
+
+## `Context<'_, S>` — Span Context for Layers
+
+The `Context<'a, S>` type is passed to every `Layer` method. It provides access to the wrapped subscriber's view of the current execution context and — when `S: for<'lookup> LookupSpan<'lookup>` — to stored span data in the registry.
+
+```rust
+pub struct Context<'a, S> { /* ... */ }
+```
+
+Key methods on `Context`:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ctx.current_span()` | `span::Current` | Returns the ID (and metadata) of the currently-entered span. |
+| `ctx.lookup_current()` | `Option<SpanRef<'_, S>>` | Looks up stored data for the current span. Requires `S: LookupSpan`. |
+| `ctx.span(id)` | `Option<SpanRef<'_, S>>` | Looks up stored data for the span with the given ID. Requires `S: LookupSpan`. |
+| `ctx.event_span(event)` | `Option<SpanRef<'_, S>>` | Returns the span that an event was recorded in (respects explicit parent overrides). Requires `S: LookupSpan`. |
+| `ctx.enabled(metadata)` | `bool` | Returns whether the wrapped subscriber would enable the given metadata. |
+
+### Accessing the Registry from a Layer
+
+To use span lookup methods, bound `S` with `LookupSpan`:
+
+```rust
+use tracing_subscriber::{layer::Layer, registry::LookupSpan};
+use tracing_core::Subscriber;
+
+pub struct MyLayer;
+
+impl<S> Layer<S> for MyLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing_core::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if let Some(span) = ctx.event_span(event) {
+            println!("event in span: {}", span.name());
+        }
+    }
+}
+```
+
+## Blanket Implementations
+
+`Layer` is implemented for several wrapper types out of the box:
+
+<CardGroup cols={2}>
+  <Card title="Option&lt;L&gt;" icon="circle-question">
+    `None` is a no-op layer; `Some(layer)` delegates to the inner layer. Allows conditional layers without changing the subscriber's type.
+  </Card>
+  <Card title="Box&lt;dyn Layer&lt;S&gt; + Send + Sync&gt;" icon="box">
+    Type-erased boxed layers. Use `.boxed()` to produce one when layers have diverging concrete types.
+  </Card>
+  <Card title="Vec&lt;L&gt;" icon="list">
+    A vector of layers of the same type. All layers in the `Vec` receive every notification.
+  </Card>
+  <Card title="Identity" icon="circle-check">
+    A zero-overhead no-op layer useful as a placeholder or default.
+  </Card>
+</CardGroup>
+
+## Minimal Layer Implementation Example
+
+```rust
+use tracing_subscriber::{layer::Layer, registry::LookupSpan};
+use tracing_core::{span, Event, Subscriber};
+
+pub struct PrintLayer;
+
+impl<S> Layer<S> for PrintLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &span::Attributes<'_>,
+        id: &span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        println!("new span: {} (id={:?})", attrs.metadata().name(), id);
+    }
+
+    fn on_event(
+        &self,
+        event: &Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        println!("event: {}", event.metadata().name());
+    }
+
+    fn on_close(
+        &self,
+        id: span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        println!("closing span: {:?}", id);
+    }
+}
+
+fn main() {
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(PrintLayer)
+        .init();
+
+    let span = tracing::info_span!("my_span");
+    let _guard = span.enter();
+    tracing::info!("hello from inside the span");
+}
+```
+
+<Tip>
+Import `tracing_subscriber::prelude::*` to bring `SubscriberExt::with` into scope, enabling the fluent `.with(layer)` builder pattern on any `Subscriber`.
+</Tip>

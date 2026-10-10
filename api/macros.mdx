@@ -1,0 +1,407 @@
+---
+title: "Tracing Macros Reference: Spans, Events, and Levels"
+sidebarTitle: "Macros"
+description: "Complete reference for all tracing macros — create spans, emit events, and query subscriber state across TRACE, DEBUG, INFO, WARN, and ERROR levels."
+---
+
+The `tracing` crate exposes its entire instrumentation surface through declarative macros. Rather than calling constructors directly, you use macros to create spans, fire events, and probe whether a given level is currently enabled. All macros accept an optional `target:` attribute to override the default module-path target, a `parent:` attribute to override the default contextual parent, and a `name:` attribute (event macros only) to override the synthetic event name derived from the file and line number.
+
+<Tabs>
+  <Tab title="Span Macros">
+
+Span macros return a [`Span`](/api/span) value. Spans are not entered automatically — you must call `.enter()`, `.entered()`, or `.in_scope(|| ...)` to make a span the active context.
+
+---
+
+### `span!`
+
+The generic span-creation macro. All level-specific span macros delegate to this one.
+
+```
+span!(level, name)
+span!(level, name, field = value, ...)
+span!(target: "my_target", level, name, field = value, ...)
+span!(parent: &parent_span, level, name, field = value, ...)
+span!(target: "t", parent: &p, level, name, field = value, ...)
+```
+
+**Parameters**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `level` | `Level` | Verbosity level (`Level::TRACE` … `Level::ERROR`) |
+| `name` | `&'static str` | Human-readable span name |
+| `field = value` | key-value pairs | Structured fields recorded at span creation |
+| `target:` | `&str` (optional) | Override the log target (defaults to `module_path!()`) |
+| `parent:` | `impl Into<Option<Id>>` (optional) | Explicit parent span (defaults to current context) |
+
+**Field value formats**
+
+| Syntax | Serialization |
+|--------|---------------|
+| `key = value` | Recorded as a typed `Value` |
+| `?key` / `?key = expr` | Recorded via `fmt::Debug` |
+| `%key` / `%key = expr` | Recorded via `fmt::Display` |
+| `key` (bare ident) | Shorthand for `key = key` — records the local variable |
+| `key = field::Empty` | Reserves the field; fill it later with `span.record(...)` |
+
+```rust
+use tracing::{span, Level};
+
+let request_id = 42u64;
+let span = span!(
+    Level::INFO,
+    "handle_request",
+    request_id,          // shorthand: records local var
+    method = "GET",      // plain value
+    path = %"/api/v1",   // Display format
+    body = ?some_struct, // Debug format
+);
+let _enter = span.enter();
+// work happens here
+```
+
+---
+
+### `trace_span!`
+
+Constructs a span at `Level::TRACE`. Equivalent to `span!(Level::TRACE, ...)`.
+
+```
+trace_span!(name)
+trace_span!(name, field = value, ...)
+trace_span!(target: "my_target", name, field = value, ...)
+trace_span!(parent: &parent, name, field = value, ...)
+```
+
+```rust
+use tracing::trace_span;
+
+let span = trace_span!("db_query", sql = "SELECT 1");
+let _enter = span.enter();
+```
+
+---
+
+### `debug_span!`
+
+Constructs a span at `Level::DEBUG`. Equivalent to `span!(Level::DEBUG, ...)`.
+
+```
+debug_span!(name)
+debug_span!(name, field = value, ...)
+debug_span!(target: "my_target", name, field = value, ...)
+debug_span!(parent: &parent, name, field = value, ...)
+```
+
+```rust
+use tracing::debug_span;
+
+let span = debug_span!("parse_config", path = "/etc/app.toml");
+span.in_scope(|| {
+    // parsing work
+});
+```
+
+---
+
+### `info_span!`
+
+Constructs a span at `Level::INFO`. Equivalent to `span!(Level::INFO, ...)`.
+
+```
+info_span!(name)
+info_span!(name, field = value, ...)
+info_span!(target: "my_target", name, field = value, ...)
+info_span!(parent: &parent, name, field = value, ...)
+```
+
+```rust
+use tracing::{info_span, Instrument};
+
+let span = info_span!("http_request", method = "POST", url = %req.uri());
+async_handler(req).instrument(span).await;
+```
+
+---
+
+### `warn_span!`
+
+Constructs a span at `Level::WARN`. Equivalent to `span!(Level::WARN, ...)`.
+
+```
+warn_span!(name)
+warn_span!(name, field = value, ...)
+warn_span!(target: "my_target", name, field = value, ...)
+warn_span!(parent: &parent, name, field = value, ...)
+```
+
+```rust
+use tracing::warn_span;
+
+let span = warn_span!("retry_attempt", attempt = 3, max_attempts = 5);
+let _guard = span.entered();
+```
+
+---
+
+### `error_span!`
+
+Constructs a span at `Level::ERROR`. Equivalent to `span!(Level::ERROR, ...)`.
+
+```
+error_span!(name)
+error_span!(name, field = value, ...)
+error_span!(target: "my_target", name, field = value, ...)
+error_span!(parent: &parent, name, field = value, ...)
+```
+
+```rust
+use tracing::error_span;
+
+let span = error_span!("fatal_failure", component = "auth", code = 500);
+let _guard = span.entered();
+// record more details while inside the span
+span.record("user_id", user.id);
+```
+
+  </Tab>
+  <Tab title="Event Macros">
+
+Event macros immediately record a single point-in-time observation and dispatch it to the current subscriber. Unlike span macros they do not return a value.
+
+---
+
+### `event!`
+
+The generic event macro. All level-specific event macros delegate to this one.
+
+```
+event!(level, "message")
+event!(level, field = value, ..., "message")
+event!(level, field = value, ...)
+event!(target: "my_target", level, field = value, ..., "message")
+event!(parent: &span, level, field = value, ..., "message")
+event!(name: "custom_name", level, field = value, ..., "message")
+```
+
+The final positional arguments are treated as a `format_args!`-style message, which becomes an implicit `message` field.
+
+```rust
+use tracing::{event, Level};
+
+let bytes_written: usize = 1024;
+event!(Level::INFO, bytes = bytes_written, "flushed buffer");
+
+// Format string works just like format!()
+event!(Level::WARN, user_id = 99, "rate limit exceeded: {} req/s", rate);
+
+// Explicit parent
+event!(parent: &my_span, Level::DEBUG, "sub-operation complete");
+```
+
+---
+
+### `trace!`
+
+Emits an event at `Level::TRACE`. Equivalent to `event!(Level::TRACE, ...)`.
+
+```
+trace!("message")
+trace!(field = value, ..., "message")
+trace!(target: "my_target", field = value, ..., "message")
+```
+
+```rust
+use tracing::trace;
+
+trace!(input = ?raw_bytes, "received data from socket");
+```
+
+---
+
+### `debug!`
+
+Emits an event at `Level::DEBUG`. Equivalent to `event!(Level::DEBUG, ...)`.
+
+```
+debug!("message")
+debug!(field = value, ..., "message")
+debug!(target: "my_target", field = value, ..., "message")
+```
+
+```rust
+use tracing::debug;
+
+debug!(config = ?loaded_cfg, "configuration loaded");
+```
+
+---
+
+### `info!`
+
+Emits an event at `Level::INFO`. Equivalent to `event!(Level::INFO, ...)`.
+
+```
+info!("message")
+info!(field = value, ..., "message")
+info!(target: "my_target", field = value, ..., "message")
+```
+
+```rust
+use tracing::info;
+
+info!(server_addr = %addr, "listening for connections");
+```
+
+---
+
+### `warn!`
+
+Emits an event at `Level::WARN`. Equivalent to `event!(Level::WARN, ...)`.
+
+```
+warn!("message")
+warn!(field = value, ..., "message")
+warn!(target: "my_target", field = value, ..., "message")
+```
+
+```rust
+use tracing::warn;
+
+warn!(retries_left = 2, error = %err, "request failed, will retry");
+```
+
+---
+
+### `error!`
+
+Emits an event at `Level::ERROR`. Equivalent to `event!(Level::ERROR, ...)`.
+
+```
+error!("message")
+error!(field = value, ..., "message")
+error!(target: "my_target", field = value, ..., "message")
+```
+
+```rust
+use tracing::error;
+
+error!(
+    error = %e,
+    request_id,
+    "unrecoverable error processing request"
+);
+```
+
+---
+
+### Field value formats (event macros)
+
+The same field sigil syntax used in span macros applies to event macros:
+
+| Syntax | Serialization |
+|--------|---------------|
+| `key = expr` | Typed `Value` (implements `tracing::Value`) |
+| `?key` / `?key = expr` | Uses `fmt::Debug` |
+| `%key` / `%key = expr` | Uses `fmt::Display` |
+| `key` (bare ident) | Shorthand for `key = key` |
+
+<Note>
+Unlike spans, events must have a value for every field they declare at the call site — there is no `field::Empty` deferred-recording for events.
+</Note>
+
+  </Tab>
+  <Tab title="Utility Macros">
+
+These macros let you query the current subscriber before performing expensive work, avoiding the cost of building arguments that would ultimately be discarded.
+
+---
+
+### `enabled!`
+
+Tests whether a span **or** event with the given level (and optional target / fields) would be recorded by the current subscriber. Returns `bool`.
+
+```
+enabled!(level) -> bool
+enabled!(level, field_name) -> bool
+enabled!(target: "my_target", level) -> bool
+```
+
+```rust
+use tracing::{enabled, Level};
+
+if enabled!(Level::DEBUG) {
+    let expensive = compute_debug_snapshot();
+    debug!(snapshot = ?expensive, "captured state");
+}
+```
+
+<Tip>
+`enabled!` may return false positives or false negatives when the subscriber's filter is more specific than the metadata provided (e.g., it filters by field values). Use it only as a performance hint.
+</Tip>
+
+---
+
+### `event_enabled!`
+
+Like `enabled!`, but signals to the subscriber that the caller is checking for an **event** specifically (sets `Kind::EVENT` on the hint callsite). Returns `bool`.
+
+```
+event_enabled!(level) -> bool
+event_enabled!(level, field_name) -> bool
+event_enabled!(target: "my_target", level) -> bool
+```
+
+```rust
+use tracing::{event_enabled, Level};
+
+if event_enabled!(target: "audit", Level::INFO) {
+    let audit_record = build_audit_record(&ctx);
+    info!(target: "audit", record = ?audit_record, "access granted");
+}
+```
+
+---
+
+### `span_enabled!`
+
+Like `enabled!`, but signals to the subscriber that the caller is checking for a **span** specifically (sets `Kind::SPAN` on the hint callsite). Returns `bool`.
+
+```
+span_enabled!(level) -> bool
+span_enabled!(level, field_name) -> bool
+span_enabled!(target: "my_target", level) -> bool
+```
+
+```rust
+use tracing::{span_enabled, Level, info_span};
+
+if span_enabled!(Level::INFO) {
+    let span = info_span!("expensive_operation", input = ?large_value);
+    let _guard = span.entered();
+    perform_work();
+}
+```
+
+---
+
+### `level_enabled!`
+
+A lower-level macro that tests only the **static** maximum level configured at compile time via the `RUST_LOG` / Cargo feature flags. This is the first guard in all span and event macros and is the fastest possible check.
+
+```
+level_enabled!(level) -> bool
+```
+
+```rust
+use tracing::{level_enabled, Level};
+
+if level_enabled!(Level::TRACE) {
+    // This branch is compiled out entirely in release when
+    // the `max_level_release` feature is set below TRACE.
+}
+```
+
+  </Tab>
+</Tabs>

@@ -1,0 +1,395 @@
+---
+title: "Instrumenting Functions with #[instrument]"
+sidebarTitle: "#[instrument]"
+description: "Use the #[instrument] attribute macro to automatically create tracing spans for functions, recording arguments as fields with zero boilerplate."
+---
+
+The `#[instrument]` attribute macro is the most ergonomic way to add `tracing` spans to your code. Applied to any function, it automatically creates and enters a span every time that function is called, recording all function arguments as structured fields. You get rich execution-context tracing with a single line of annotation, and the span is always exited — even on panics — because the macro generates proper RAII-based entry/exit code.
+
+## Basic Usage
+
+Add `#[tracing::instrument]` (or `#[instrument]` with `use tracing::instrument`) to any function:
+
+```rust
+use tracing::instrument;
+
+#[instrument]
+pub fn my_function(my_arg: usize) {
+    // This event is recorded inside a span named `my_function`
+    // with the field `my_arg = <value>`.
+    tracing::info!("inside my_function!");
+}
+```
+
+By default:
+- The span is named after the function (`"my_function"` above).
+- The span level is `INFO`.
+- Every function argument is recorded as a field using its `fmt::Debug` implementation (for types that don't implement `tracing`'s `Value` trait directly).
+- The target defaults to the module path.
+
+## What the Macro Generates
+
+`#[instrument]` transforms the function body so that a new span is created at function entry, entered for the entire body, and exited when the function returns (or panics):
+
+```rust
+// Before: what you write
+#[instrument]
+pub fn nth_fibonacci(n: u64) -> u64 {
+    if n == 0 || n == 1 {
+        tracing::debug!("Base case");
+        1
+    } else {
+        tracing::debug!("Recursing");
+        nth_fibonacci(n - 1) + nth_fibonacci(n - 2)
+    }
+}
+
+// After: roughly what the macro generates (simplified)
+pub fn nth_fibonacci(n: u64) -> u64 {
+    let __span = tracing::info_span!("nth_fibonacci", n = n);
+    let __enter = __span.enter();
+    {
+        if n == 0 || n == 1 {
+            tracing::debug!("Base case");
+            1
+        } else {
+            tracing::debug!("Recursing");
+            nth_fibonacci(n - 1) + nth_fibonacci(n - 2)
+        }
+    }
+}
+```
+
+Because the span guard is held for the duration of the function, all events emitted inside — including those from nested calls — appear within the correct span hierarchy.
+
+## Configuration Options
+
+`#[instrument]` accepts a rich set of named arguments to customise the generated span.
+
+### `name` — Override the Span Name
+
+By default the span is named after the function. Use `name` to provide a different string:
+
+```rust
+use tracing::instrument;
+
+// The generated span is named "my_span", not "my_function"
+#[instrument(name = "my_span")]
+pub fn my_function() {
+    // ...
+}
+```
+
+### `level` — Set the Verbosity Level
+
+Override the default `INFO` level with any `Level` constant or a string literal:
+
+```rust
+use tracing::{instrument, Level};
+
+// Span will be at DEBUG level
+#[instrument(level = Level::DEBUG)]
+pub fn my_function() { /* ... */ }
+
+// Equivalent string form
+#[instrument(level = "debug")]
+pub fn my_function_str() { /* ... */ }
+
+// Numeric form (1 = TRACE, 5 = ERROR)
+#[instrument(level = 2)]
+pub fn my_function_num() { /* ... */ }
+```
+
+### `skip` — Exclude Specific Arguments
+
+Pass argument names to `skip` to prevent them from being recorded as fields. This is useful for types that don't implement `fmt::Debug`, or for values whose `Debug` representation is excessively large:
+
+```rust
+use tracing::instrument;
+
+// This type doesn't implement `fmt::Debug`
+struct NonDebug;
+
+// `arg` is recorded; `non_debug` is not
+#[instrument(skip(non_debug))]
+fn my_function(arg: usize, non_debug: NonDebug) {
+    // ...
+}
+```
+
+Skipping `self` is also supported for methods:
+
+```rust
+use tracing::instrument;
+
+#[derive(Debug)]
+struct MyType {
+    data: Vec<u8>, // potentially kilobytes of data
+}
+
+impl MyType {
+    #[instrument(skip(self))]
+    pub fn my_method(&mut self, an_interesting_argument: usize) {
+        // `self` is not recorded; `an_interesting_argument` is
+    }
+}
+```
+
+### `skip_all` — Exclude All Arguments
+
+Use `skip_all` when you want a span with no automatically-recorded arguments at all:
+
+```rust
+use tracing::instrument;
+use std::collections::HashMap;
+
+#[instrument(skip_all)]
+fn my_big_data_function(large: Vec<u8>, also_large: HashMap<String, String>) {
+    // No arguments are recorded as fields
+}
+```
+
+### `fields` — Add Extra Fields
+
+Add computed or custom fields using the same `key = value` syntax as `span!`:
+
+```rust
+use tracing::instrument;
+
+// Records `i` (from the arg) AND `next = i + 1` (computed)
+#[instrument(fields(next = i + 1))]
+pub fn my_function(i: usize) {
+    // ...
+}
+```
+
+You can combine `skip` with `fields` to record specific properties of a struct rather than the whole thing:
+
+```rust
+use tracing::instrument;
+
+#[derive(Debug)]
+struct MyType {
+    name: &'static str,
+    data: Vec<u8>,
+}
+
+impl MyType {
+    // Skip `self` entirely, but record `self.name` using Display
+    #[instrument(skip(self), fields(self.name = %self.name))]
+    pub fn my_method(&mut self, an_interesting_argument: usize) {
+        // ...
+    }
+}
+```
+
+### `ret` — Record the Return Value
+
+Add `ret` to emit an event containing the return value when the function exits successfully:
+
+```rust
+use tracing::instrument;
+
+#[instrument(ret)]
+fn my_function() -> i32 {
+    42
+    // emits: event: return = 42
+}
+```
+
+For `Result`-returning functions, `ret` only fires on `Ok`. You can also override the level and formatting:
+
+```rust
+use tracing::{instrument, Level};
+
+// Records the return value at WARN level using Display
+#[instrument(ret(level = Level::WARN, Display))]
+fn my_function() -> i32 {
+    42
+}
+```
+
+### `err` — Record Errors
+
+Add `err` to emit an event when a `Result`-returning function returns `Err`. The error is recorded using `fmt::Display` by default:
+
+```rust
+use tracing::instrument;
+
+#[instrument(err)]
+fn my_function(arg: usize) -> Result<(), std::io::Error> {
+    // If this returns Err, an ERROR-level event is emitted
+    Ok(())
+}
+```
+
+Override the level or formatting independently:
+
+```rust
+use tracing::{instrument, Level};
+
+// Record the error at INFO level using Debug
+#[instrument(err(level = Level::INFO, Debug))]
+fn my_function(arg: usize) -> Result<(), std::io::Error> {
+    Ok(())
+}
+```
+
+Combine `ret` and `err` to capture both outcomes:
+
+```rust
+use tracing::instrument;
+
+#[instrument(err, ret)]
+fn my_function(arg: usize) -> Result<(), std::io::Error> {
+    Ok(())
+}
+```
+
+### `target` — Override the Span Target
+
+Override the target (defaults to the module path):
+
+```rust
+use tracing::instrument;
+
+pub mod my_module {
+    // Target will be "my_crate::some_special_target" instead of "my_crate::my_module"
+    #[tracing::instrument(target = "my_crate::some_special_target")]
+    pub fn my_function() { /* ... */ }
+}
+```
+
+### `parent` — Set an Explicit Parent Span
+
+Override which span is treated as this span's parent:
+
+```rust
+use tracing::instrument;
+
+// Make the generated span a root (no parent)
+#[instrument(parent = None)]
+pub fn my_function() { /* ... */ }
+```
+
+You can also pass an expression that evaluates to a `&Span`:
+
+```rust
+use tracing::instrument;
+
+struct MyStruct {
+    span: tracing::Span,
+}
+
+impl MyStruct {
+    // Use the struct's `span` field as the parent span
+    #[instrument(parent = &self.span, skip(self))]
+    fn my_method(&self) {}
+}
+```
+
+## Using with `async fn`
+
+`#[instrument]` works correctly with `async fn`. The macro automatically wraps the future in the span using the `Instrument` combinator, ensuring the span is entered and exited on each poll — not held across yield points:
+
+```rust
+use tracing::instrument;
+
+#[instrument]
+pub async fn connect(addr: &std::net::SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    let stream = tokio::net::TcpStream::connect(addr).await;
+    tracing::info!("created stream");
+    stream
+}
+
+#[instrument]
+pub async fn write(stream: &mut tokio::net::TcpStream) -> std::io::Result<usize> {
+    let result = stream.write(b"hello world\n").await;
+    tracing::info!("wrote to stream; success={:?}", result.is_ok());
+    result
+}
+```
+
+This is the recommended approach for async code — see [Tracing Async Code](/instrumentation/async-code) for a deeper explanation of why `Span::enter()` is dangerous in async and how `#[instrument]` avoids the pitfall.
+
+## A Realistic Example — Recursive Instrumentation
+
+From the `attrs-args` example in the tracing repository — `#[instrument]` on recursive functions creates a natural span tree:
+
+```rust
+use tracing::{debug, info};
+use tracing_attributes::instrument;
+
+#[instrument]
+fn nth_fibonacci(n: u64) -> u64 {
+    if n == 0 || n == 1 {
+        debug!("Base case");
+        1
+    } else {
+        debug!("Recursing");
+        nth_fibonacci(n - 1) + nth_fibonacci(n - 2)
+    }
+}
+
+#[instrument]
+fn fibonacci_seq(to: u64) -> Vec<u64> {
+    let mut sequence = vec![];
+    for n in 0..=to {
+        debug!("Pushing {n} fibonacci", n = n);
+        sequence.push(nth_fibonacci(n));
+    }
+    sequence
+}
+
+fn main() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("attrs_args=trace")
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let n = 5;
+        let sequence = fibonacci_seq(n);
+        info!("The first {} fibonacci numbers are {:?}", n, sequence);
+    })
+}
+```
+
+Each call to `nth_fibonacci` creates a new span with `n` recorded as a field, and spans nest according to the call stack — giving you a complete picture of the recursive execution in your trace viewer.
+
+## Option Reference
+
+<Steps>
+  <Step title="name">
+    `name = "custom_name"` — Override the auto-generated span name.
+  </Step>
+  <Step title="level">
+    `level = "debug"` or `level = Level::DEBUG` — Set the span verbosity level (default: `INFO`).
+  </Step>
+  <Step title="skip / skip_all">
+    `skip(arg1, arg2)` or `skip_all` — Exclude arguments from being recorded as fields.
+  </Step>
+  <Step title="fields">
+    `fields(key = expr, ...)` — Add extra computed fields to the generated span.
+  </Step>
+  <Step title="ret">
+    `ret` or `ret(level = Level::WARN)` or `ret(Display)` — Emit an event with the return value on success.
+  </Step>
+  <Step title="err">
+    `err` or `err(level = Level::INFO)` or `err(Debug)` — Emit an event with the error on `Err` returns.
+  </Step>
+  <Step title="target">
+    `target = "my_module"` — Override the span's target string.
+  </Step>
+  <Step title="parent">
+    `parent = &span` or `parent = None` — Set an explicit parent span or mark the span as a root.
+  </Step>
+</Steps>
+
+<CardGroup cols={2}>
+  <Card title="Async Code" icon="arrows-spin" href="/instrumentation/async-code">
+    Why #[instrument] is the safest choice for async functions
+  </Card>
+  <Card title="Spans" icon="clock" href="/instrumentation/spans">
+    Create and manage spans manually for more complex scenarios
+  </Card>
+</CardGroup>

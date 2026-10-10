@@ -1,0 +1,138 @@
+---
+title: "Subscribers: Collecting Tracing Data in Rust"
+sidebarTitle: "Overview"
+description: "Learn how tracing subscribers and layers collect, filter, and dispatch structured diagnostic data in Rust applications."
+---
+
+Subscribers are the backbone of the `tracing` ecosystem. Every span and event emitted by your instrumentation must be _collected_ by something — a subscriber receives those notifications and decides what to do with them: write to stdout, emit JSON, export to a tracing backend, or discard them entirely. The `tracing-subscriber` crate provides both the abstractions and a set of batteries-included implementations for building that collection pipeline.
+
+## The `Subscriber` Trait
+
+The [`Subscriber`](https://docs.rs/tracing-core/latest/tracing_core/trait.Subscriber.html) trait, defined in `tracing-core`, represents the complete set of functionality required to consume tracing instrumentation. A `Subscriber` implementation is responsible for:
+
+- **Generating span IDs** via `new_span` — each span in the system gets a unique ID from the authoritative subscriber.
+- **Recording span fields** via `record` when additional key-value data is attached to a span.
+- **Tracking span entry and exit** via `enter` and `exit`.
+- **Processing events** via `event` when an `event!` macro fires.
+- **Filtering** via `enabled` and `register_callsite` to avoid unnecessary work.
+
+Because only one subscriber can be the authoritative source of span IDs for a given execution context, a `Subscriber` represents the _root_ of the collection pipeline. Everything else — formatting, filtering, exporting — is layered on top.
+
+## Installing a Subscriber
+
+There are two ways to put a subscriber into effect: globally for the entire process, or scoped to a closure.
+
+**Global default** — use `set_global_default` to install a subscriber that applies to all threads. This is the typical approach for application binaries:
+
+```rust
+use tracing_subscriber::FmtSubscriber;
+
+let subscriber = FmtSubscriber::new();
+
+tracing::subscriber::set_global_default(subscriber)
+    .expect("Unable to set global default subscriber");
+```
+
+**Scoped default** — use `with_default` to install a subscriber only for the duration of a closure. This is useful in tests and benchmarks where you need isolation:
+
+```rust
+use tracing_subscriber::fmt;
+use tracing::subscriber::with_default;
+
+let subscriber = fmt()
+    .with_max_level(tracing::Level::DEBUG)
+    .finish();
+
+with_default(subscriber, || {
+    // The subscriber is active only inside this closure.
+    tracing::info!("this event is captured");
+});
+```
+
+<Note>
+Libraries should **never** call `set_global_default`. Only application binaries should install a global subscriber. Libraries should emit spans and events using the `tracing` macros and leave collection to the caller.
+</Note>
+
+## The Registry
+
+`tracing_subscriber::Registry` is the standard base `Subscriber` implementation provided by `tracing-subscriber`. It manages per-span storage — things like span metadata, parent–child relationships, and arbitrary extension data that layers can attach to spans.
+
+`Registry` itself does not format or output anything; its sole purpose is to be the root of a layered subscriber stack and to give `Layer`s a shared, thread-safe place to store span data.
+
+```rust
+use tracing_subscriber::{registry::Registry, prelude::*};
+
+let subscriber = Registry::default()
+    .with(/* layer_a */)
+    .with(/* layer_b */);
+
+tracing::subscriber::set_global_default(subscriber)
+    .expect("Unable to set global subscriber");
+```
+
+The convenience function `tracing_subscriber::registry()` is shorthand for `Registry::default()`.
+
+<Tip>
+Layers that need to look up span data — such as a layer that prints span fields when an event fires — should bound their subscriber type parameter with `for<'a> LookupSpan<'a>`. `Registry` implements this trait, so any `Layer` that requires span lookups works naturally with a `Registry`-based stack.
+</Tip>
+
+## Layers vs Subscribers
+
+While a `Subscriber` is a complete, standalone implementation of the collection pipeline, a `Layer` is a _composable subset_ of that behavior. Layers can observe events and spans, but they do **not** assign span IDs — that responsibility always belongs to the root `Subscriber` (typically `Registry`).
+
+| | `Subscriber` | `Layer` |
+|---|---|---|
+| Assigns span IDs | ✅ | ❌ |
+| Observes events | ✅ | ✅ |
+| Composable | ❌ | ✅ |
+| Per-layer filtering | ❌ | ✅ |
+
+The `SubscriberExt::with` method (from `tracing_subscriber::prelude::*`) stacks layers onto a subscriber, returning a `Layered` type that itself implements `Subscriber`:
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+tracing_subscriber::registry()
+    .with(EnvFilter::from_default_env())
+    .with(fmt::layer())
+    .init();
+```
+
+This composability is the central design idea of `tracing-subscriber`: instead of one monolithic subscriber, you build a pipeline from small, focused pieces.
+
+## Feature Flags
+
+`tracing-subscriber` uses Cargo feature flags to keep the dependency footprint small. The following features are available:
+
+| Feature | Default | Description |
+|---|---|---|
+| `std` | ✅ | Enables APIs that depend on the Rust standard library |
+| `alloc` | ✅ | Enables `liballoc`-dependent APIs (implied by `std`) |
+| `fmt` | ✅ | The `fmt` module and `FmtSubscriber` for formatted log output |
+| `ansi` | ✅ | ANSI terminal colour support in the `fmt` subscriber |
+| `registry` | ✅ | The `Registry` type for per-span storage |
+| `env-filter` | ❌ | `EnvFilter` for `RUST_LOG`-style runtime filtering |
+| `json` | ❌ | JSON output format in `fmt` (requires `fmt`) |
+| `local-time` | ❌ | Local-timezone timestamp formatting via the `time` crate |
+
+To add `tracing-subscriber` with the `env-filter` and `json` features enabled:
+
+```toml
+[dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+```
+
+<CardGroup cols={2}>
+  <Card title="fmt Subscriber" icon="terminal" href="/subscribers/fmt-subscriber">
+    Format and print trace events to stdout, stderr, or any `io::Write` sink, with full, compact, pretty, or JSON output.
+  </Card>
+  <Card title="EnvFilter" icon="filter" href="/subscribers/env-filter">
+    Filter spans and events at runtime using `RUST_LOG`-style directives, including target, level, span name, and field value matching.
+  </Card>
+  <Card title="Composing Layers" icon="layers" href="/subscribers/composing-layers">
+    Stack multiple layers on a `Registry` to build a flexible, multi-destination tracing pipeline with per-layer filtering.
+  </Card>
+  <Card title="Custom Subscribers" icon="code" href="/subscribers/custom-subscribers">
+    Implement the `Layer` trait (or `Subscriber` directly) to send trace data to any custom sink or external system.
+  </Card>
+</CardGroup>

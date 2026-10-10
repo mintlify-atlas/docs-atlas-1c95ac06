@@ -1,0 +1,304 @@
+---
+title: "Event API Reference: Recording Moments in Tracing"
+sidebarTitle: "Event"
+description: "API reference for Event, the Visit trait, Metadata, and Level — the core types for recording and inspecting discrete observations in the tracing framework."
+---
+
+An event represents a single discrete moment during program execution — analogous to a log record, but richer. Unlike a log line, an event exists within the context of a [span](/api/span), which means it carries temporal and contextual provenance through the trace tree. Events carry structured key-value _fields_ (including an optional free-text `message` field) and a reference to static [`Metadata`](#metadata) that describes the event's name, level, source location, and field schema.
+
+In normal usage you never construct `Event` directly — you emit events through the [`event!`, `trace!`, `debug!`, `info!`, `warn!`, and `error!` macros](/api/macros). The `Event` type is primarily relevant when you are **implementing a subscriber** and need to inspect the events it receives.
+
+---
+
+## `Event<'a>`
+
+```rust
+pub struct Event<'a> { /* private fields */ }
+```
+
+Defined in `tracing-core`. An `Event` is handed to `Subscriber::event` each time instrumentation code fires an event macro. It provides access to the event's static metadata and its runtime field values.
+
+---
+
+### `Event::metadata`
+
+```rust
+pub fn metadata(&self) -> &'static Metadata<'static>
+```
+
+Returns a reference to the `Metadata` struct that describes this event: its name, target, level, source location, and the set of field names it may carry.
+
+```rust
+use tracing_core::{Subscriber, Event, Metadata};
+
+struct LoggingSubscriber;
+
+impl Subscriber for LoggingSubscriber {
+    fn event(&self, event: &Event<'_>) {
+        let meta = event.metadata();
+        println!("[{}] {} at {}:{}",
+            meta.level(),
+            meta.target(),
+            meta.file().unwrap_or("<unknown>"),
+            meta.line().unwrap_or(0),
+        );
+    }
+    // ... other required methods
+}
+```
+
+---
+
+### `Event::record`
+
+```rust
+pub fn record(&self, visitor: &mut dyn field::Visit)
+```
+
+Drives a [visitor](#the-visit-trait) through all field-value pairs attached to this event. Each field value is dispatched to the appropriate `Visit` method based on its type.
+
+```rust
+use tracing_core::{Event, field::{Visit, Field}};
+use std::fmt;
+
+struct PrintVisitor;
+
+impl Visit for PrintVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        println!("  {} = {:?}", field.name(), value);
+    }
+}
+
+// Inside a Subscriber::event implementation:
+fn event(&self, event: &Event<'_>) {
+    println!("event: {}", event.metadata().name());
+    event.record(&mut PrintVisitor);
+}
+```
+
+---
+
+### `Event::fields`
+
+```rust
+pub fn fields(&self) -> field::Iter
+```
+
+Returns an iterator over the `Field` keys declared on this event. Note that this yields only the field _descriptors_ — to get values, use `Event::record` with a visitor.
+
+---
+
+### `Event::parent`
+
+```rust
+pub fn parent(&self) -> Option<&Id>
+```
+
+Returns the explicitly-specified parent span `Id`, if one was provided via `parent:` in the event macro. Returns `None` for contextual (default) events.
+
+---
+
+### `Event::is_contextual`
+
+```rust
+pub fn is_contextual(&self) -> bool
+```
+
+Returns `true` if this event's parent should be determined from the thread's current span context (the common case). Returns `false` if an explicit `parent:` or root was specified.
+
+---
+
+### `Event::is_root`
+
+```rust
+pub fn is_root(&self) -> bool
+```
+
+Returns `true` if the event was constructed as the root of its own trace tree (no parent, even if a current span exists).
+
+---
+
+## The `Visit` Trait
+
+```rust
+pub trait Visit {
+    fn record_f64(&mut self, field: &Field, value: f64) { ... }
+    fn record_i64(&mut self, field: &Field, value: i64) { ... }
+    fn record_u64(&mut self, field: &Field, value: u64) { ... }
+    fn record_i128(&mut self, field: &Field, value: i128) { ... }
+    fn record_u128(&mut self, field: &Field, value: u128) { ... }
+    fn record_bool(&mut self, field: &Field, value: bool) { ... }
+    fn record_str(&mut self, field: &Field, value: &str) { ... }
+    fn record_bytes(&mut self, field: &Field, value: &[u8]) { ... }
+    fn record_error(&mut self, field: &Field, value: &(dyn Error + 'static)) { ... }
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug); // required
+}
+```
+
+`Visit` is the mechanism through which subscribers inspect field values. When `Event::record` (or `span::Attributes::record` / `span::Record::record`) is called with a visitor, each field value dispatches to the most specific `Visit` method for its type.
+
+All methods except `record_debug` have default implementations that forward to `record_debug`. Implementing only `record_debug` is sufficient for a basic subscriber.
+
+<Tip>
+Override individual `record_*` methods to handle specific types efficiently. For example, a metrics subscriber might override `record_i64` and `record_u64` to increment counters without any string formatting.
+</Tip>
+
+| Method | Rust type | Default behavior |
+|--------|-----------|-----------------|
+| `record_f64` | `f64` | Forwards to `record_debug` |
+| `record_i64` | `i64` | Forwards to `record_debug` |
+| `record_u64` | `u64` | Forwards to `record_debug` |
+| `record_i128` | `i128` | Forwards to `record_debug` |
+| `record_u128` | `u128` | Forwards to `record_debug` |
+| `record_bool` | `bool` | Forwards to `record_debug` |
+| `record_str` | `&str` | Forwards to `record_debug` |
+| `record_bytes` | `&[u8]` | Forwards to `record_debug` |
+| `record_error` | `&dyn Error` | Forwards to `record_debug` |
+| `record_debug` | `&dyn fmt::Debug` | **Must be implemented** |
+
+```rust
+use tracing_core::field::{Visit, Field};
+use std::fmt;
+
+struct JsonVisitor<'a>(&'a mut String);
+
+impl<'a> Visit for JsonVisitor<'a> {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.push_str(&format!(r#""{}":"{}","#, field.name(), value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.push_str(&format!(r#""{}":{},  "#, field.name(), value));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.0.push_str(&format!(r#""{}":"{:?}","#, field.name(), value));
+    }
+}
+```
+
+---
+
+## `Metadata<'a>`
+
+```rust
+pub struct Metadata<'a> { /* private fields */ }
+```
+
+Static metadata attached to every span and event. Created once per callsite at compile time; the overhead of creating the actual span or event is therefore much lower than the overhead of evaluating the metadata. Subscribers use metadata for filtering decisions.
+
+### Methods
+
+#### `.name() -> &'static str`
+
+The human-readable name of the span or event. For spans, this is the string literal passed to the span macro. For events created by the event macros without a `name:` attribute, it is a synthetic string like `"event src/main.rs:42"`.
+
+#### `.target() -> &str`
+
+The component or module that emitted this span or event. Defaults to `module_path!()`. Can be overridden with `target: "custom"` in any macro invocation.
+
+#### `.level() -> &Level`
+
+The [verbosity level](#level) of this span or event.
+
+#### `.file() -> Option<&str>`
+
+The source file where the callsite is defined, if available.
+
+#### `.line() -> Option<u32>`
+
+The line number within the source file, if available.
+
+#### `.module_path() -> Option<&str>`
+
+The Rust module path (e.g., `"my_crate::server::handler"`), if available.
+
+#### `.fields() -> &FieldSet`
+
+Describes the set of field names declared on this span or event. Use `FieldSet::iter()` to iterate over them as strings.
+
+#### `.is_event() -> bool` / `.is_span() -> bool`
+
+Indicates whether this metadata corresponds to an event or a span, respectively.
+
+```rust
+use tracing_core::Metadata;
+
+fn print_metadata(meta: &Metadata<'_>) {
+    println!(
+        "{} [{}] {}: {}",
+        if meta.is_event() { "EVENT" } else { "SPAN" },
+        meta.level(),
+        meta.target(),
+        meta.name(),
+    );
+    for field in meta.fields().iter() {
+        println!("  field: {}", field.name());
+    }
+}
+```
+
+---
+
+## `Level`
+
+```rust
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Level(/* private */);
+```
+
+An enumeration of the five verbosity levels, ordered from most to least verbose:
+
+| Constant | Verbosity | Typical use |
+|----------|-----------|-------------|
+| `Level::TRACE` | Highest | Very fine-grained, per-iteration diagnostics |
+| `Level::DEBUG` | High | Internal state useful for debugging |
+| `Level::INFO` | Medium | Operational events of general interest |
+| `Level::WARN` | Low | Potentially harmful situations |
+| `Level::ERROR` | Lowest | Serious failures requiring attention |
+
+Levels implement `PartialOrd`/`Ord`: more verbose levels are _greater than_ less verbose ones.
+
+```rust
+use tracing_core::Level;
+
+assert!(Level::TRACE > Level::DEBUG);
+assert!(Level::DEBUG > Level::INFO);
+assert!(Level::INFO  > Level::WARN);
+assert!(Level::WARN  > Level::ERROR);
+```
+
+### `Level::as_str`
+
+```rust
+pub fn as_str(&self) -> &'static str
+```
+
+Returns the uppercase string representation: `"TRACE"`, `"DEBUG"`, `"INFO"`, `"WARN"`, or `"ERROR"`.
+
+---
+
+## `LevelFilter`
+
+```rust
+pub struct LevelFilter(Option<Level>);
+```
+
+A filter comparable to a `Level`. Adds `LevelFilter::OFF` (less verbose than everything) to the five level variants. Returned by `Subscriber::max_level_hint` and used internally by the callsite registry.
+
+| Constant | Meaning |
+|----------|---------|
+| `LevelFilter::OFF` | Disables all tracing |
+| `LevelFilter::ERROR` | Only `ERROR` |
+| `LevelFilter::WARN` | `ERROR` + `WARN` |
+| `LevelFilter::INFO` | Through `INFO` |
+| `LevelFilter::DEBUG` | Through `DEBUG` |
+| `LevelFilter::TRACE` | All levels |
+
+### `LevelFilter::current`
+
+```rust
+pub fn current() -> LevelFilter
+```
+
+Returns the maximum level currently enabled globally (set by the most recently active subscriber's hint combined with compile-time feature gates).

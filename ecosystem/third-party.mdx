@@ -1,0 +1,186 @@
+---
+title: "Third-Party Integrations for the Tracing Ecosystem"
+sidebarTitle: "Third-Party"
+description: "Community-maintained crates that extend tracing with observability backends, web framework middleware, output formats, profilers, and developer utilities."
+---
+
+The `tracing` ecosystem extends well beyond the crates maintained in the `tokio-rs/tracing` repository. A rich collection of community-maintained crates connects `tracing` to observability platforms, web frameworks, output formats, profilers, and everyday development utilities. The crates listed here are **not** maintained by the Tokio project; stability and release cadence vary, so check each crate's documentation and changelog before adopting it in production.
+
+## Observability Backends
+
+<CardGroup cols={2}>
+  <Card
+    title="tracing-opentelemetry"
+    href="https://crates.io/crates/tracing-opentelemetry"
+  >
+    Exports spans and events to any OpenTelemetry-compatible backend (Jaeger, Zipkin, OTLP, etc.) by bridging the tracing subscriber API with the OpenTelemetry SDK.
+  </Card>
+  <Card
+    title="tracing-honeycomb"
+    href="https://crates.io/crates/tracing-honeycomb"
+  >
+    Reports distributed traces spanning multiple machines to Honeycomb.io. Built on top of `tracing-distributed` for a generic distributed-tracing abstraction.
+  </Card>
+  <Card
+    title="tracing-elastic-apm"
+    href="https://crates.io/crates/tracing-elastic-apm"
+  >
+    Sends span and event data to Elastic APM, enabling end-to-end distributed tracing in the Elastic observability stack.
+  </Card>
+  <Card
+    title="tracing-cloudwatch"
+    href="https://crates.io/crates/tracing-cloudwatch"
+  >
+    Ships tracing events to AWS CloudWatch Logs, making structured diagnostics available alongside other AWS infrastructure metrics.
+  </Card>
+  <Card
+    title="sentry-tracing"
+    href="https://crates.io/crates/sentry-tracing"
+  >
+    Integrates with the Sentry error-monitoring platform: routes tracing events to Sentry breadcrumbs and performance transactions.
+  </Card>
+  <Card
+    title="tracing-loki"
+    href="https://crates.io/crates/tracing-loki"
+  >
+    Ships structured log lines to Grafana Loki so they can be queried and correlated with Prometheus metrics in Grafana dashboards.
+  </Card>
+</CardGroup>
+
+## Web Framework Integrations
+
+<CardGroup cols={2}>
+  <Card
+    title="tracing-actix-web"
+    href="https://crates.io/crates/tracing-actix-web"
+  >
+    Provides a middleware for `actix-web` that creates a root span per HTTP request, propagating trace context and recording response status codes.
+  </Card>
+  <Card
+    title="tracing-actix"
+    href="https://crates.io/crates/tracing-actix"
+  >
+    Adds tracing instrumentation to the `actix` actor framework, creating spans around actor message handlers.
+  </Card>
+  <Card
+    title="tide-tracing"
+    href="https://crates.io/crates/tide-tracing"
+  >
+    A `tide` middleware that traces all incoming HTTP requests and their responses, including status codes and latency.
+  </Card>
+  <Card
+    title="reqwest-tracing"
+    href="https://crates.io/crates/reqwest-tracing"
+  >
+    Middleware for the `reqwest` HTTP client that creates a span for each outgoing request and propagates distributed trace context via HTTP headers.
+  </Card>
+  <Card
+    title="axum-insights"
+    href="https://crates.io/crates/axum-insights"
+  >
+    Provides tracing integration and Application Insights telemetry export for the `axum` web framework.
+  </Card>
+</CardGroup>
+
+## Output Formats
+
+<CardGroup cols={2}>
+  <Card
+    title="tracing-bunyan-formatter"
+    href="https://crates.io/crates/tracing-bunyan-formatter"
+  >
+    Formats events and spans as Bunyan-compatible JSON, enriched with timing information. Useful for log aggregation pipelines that expect Bunyan format.
+  </Card>
+  <Card
+    title="tracing-logfmt"
+    href="https://crates.io/crates/tracing-logfmt"
+  >
+    Serialises events and spans into the `logfmt` key=value format, widely supported by structured-log parsers such as Grafana Loki and Datadog.
+  </Card>
+  <Card
+    title="tracing-chrome"
+    href="https://crates.io/crates/tracing-chrome"
+  >
+    Exports trace data in the format consumed by `chrome://tracing` (and Perfetto), giving you a timeline view of span entry and exit.
+  </Card>
+  <Card
+    title="tracing-gelf"
+    href="https://crates.io/crates/tracing-gelf"
+  >
+    Sends events in Graylog Extended Log Format (GELF) over UDP or TCP to a Graylog instance or compatible log aggregator.
+  </Card>
+</CardGroup>
+
+## Profiling
+
+<CardGroup cols={2}>
+  <Card
+    title="tracing-tracy"
+    href="https://crates.io/crates/tracing-tracy"
+  >
+    Collects Tracy profiler frames from instrumented applications, enabling real-time frame and zone visualization in the Tracy GUI.
+  </Card>
+  <Card
+    title="tracing-coz"
+    href="https://crates.io/crates/tracing-coz"
+  >
+    Integrates with the `coz` causal profiler (Linux only) to measure the impact of potential optimizations on end-to-end latency.
+  </Card>
+</CardGroup>
+
+## Utilities and Developer Experience
+
+<CardGroup cols={2}>
+  <Card
+    title="test-log"
+    href="https://crates.io/crates/test-log"
+  >
+    Automatically initialises `tracing` (or `env_logger`) for each test, reading filter configuration from `RUST_LOG` — no per-test setup boilerplate required.
+  </Card>
+  <Card
+    title="tracing-forest"
+    href="https://crates.io/crates/tracing-forest"
+  >
+    A subscriber that preserves contextual coherence by grouping log lines from the same span together during output, making nested async traces easier to read.
+  </Card>
+  <Card
+    title="color-spantrace"
+    href="https://crates.io/crates/color-spantrace"
+  >
+    Renders `SpanTrace` values from `tracing-error` in the same colorized, human-friendly style as `color-backtrace`.
+  </Card>
+  <Card
+    title="color-eyre"
+    href="https://crates.io/crates/color-eyre"
+  >
+    A customized `eyre::Report` handler that captures `SpanTrace`s and backtraces at error construction time and pretty-prints them in panic and error reports.
+  </Card>
+  <Card
+    title="tracing-unwrap"
+    href="https://crates.io/crates/tracing-unwrap"
+  >
+    Adds `.unwrap_or_log()` and `.expect_or_log()` convenience methods to `Result` and `Option` that emit a `tracing` error event before panicking.
+  </Card>
+  <Card
+    title="diesel-tracing"
+    href="https://crates.io/crates/diesel-tracing"
+  >
+    Wraps Diesel database connections to emit a tracing span for every SQL query, recording the statement and execution time.
+  </Card>
+  <Card
+    title="tracing-wasm"
+    href="https://crates.io/crates/tracing-wasm"
+  >
+    A subscriber/layer for WebAssembly targets that reports events via the browser's `console.log` and performance spans via the User Timing API.
+  </Card>
+  <Card
+    title="tracing-web"
+    href="https://crates.io/crates/tracing-web"
+  >
+    Level-aware logging to the browser `console.*` methods and span timing to the User Timing API (`window.performance`), designed for `wasm32-unknown-unknown`.
+  </Card>
+</CardGroup>
+
+<Note>
+Some of the crates listed above are in active development and may not yet have a stable 1.0 release. Always review a crate's changelog and open issues before depending on it in a production service. If you maintain a `tracing` ecosystem crate that is not listed here, please open a pull request against the [tokio-rs/tracing](https://github.com/tokio-rs/tracing) repository to add it to the official README.
+</Note>

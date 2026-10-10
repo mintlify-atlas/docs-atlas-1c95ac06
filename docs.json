@@ -1,72 +1,100 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Tracing",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#3873ad",
+    "light": "#a473e4",
+    "dark": "#3873ad"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/46a624e9-1ecf-4448-a163-af62f689a5f4.png",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/tokio-rs/tracing"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/tokio-rs/tracing"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Instrumentation",
+            "pages": [
+              "instrumentation/spans",
+              "instrumentation/events",
+              "instrumentation/instrument-macro",
+              "instrumentation/async-code"
+            ]
+          },
+          {
+            "group": "Subscribers & Layers",
+            "pages": [
+              "subscribers/overview",
+              "subscribers/fmt-subscriber",
+              "subscribers/env-filter",
+              "subscribers/composing-layers",
+              "subscribers/custom-subscribers"
+            ]
+          },
+          {
+            "group": "Ecosystem Crates",
+            "pages": [
+              "ecosystem/tracing-appender",
+              "ecosystem/tracing-error",
+              "ecosystem/tracing-flame",
+              "ecosystem/tracing-log",
+              "ecosystem/third-party"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/logging-migration",
+              "guides/no-std",
+              "guides/performance"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/macros",
+              "api/span",
+              "api/event",
+              "api/subscriber",
+              "api/dispatcher"
+            ]
+          },
+          {
+            "group": "tracing-subscriber",
+            "pages": [
+              "api/tracing-subscriber/layer",
+              "api/tracing-subscriber/fmt",
+              "api/tracing-subscriber/filter",
+              "api/tracing-subscriber/registry"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

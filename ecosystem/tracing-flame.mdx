@@ -1,0 +1,172 @@
+---
+title: "Generating Flamegraphs with tracing-flame"
+sidebarTitle: "tracing-flame"
+description: "Record tracing span entry and exit events as folded stack samples, then visualize them as interactive flamegraphs or flamecharts using inferno."
+---
+
+`tracing-flame` is a `tracing-subscriber` layer that records span open and close events as folded stack-trace samples in the format consumed by [inferno](https://docs.rs/inferno). The output can be rendered into an interactive SVG flamegraph — a visualization invented by Brendan Gregg that makes it easy to identify where your application spends most of its time. Because the data comes from `tracing` instrumentation rather than sampling, every span entry and exit is captured precisely.
+
+<Note>
+This crate is currently **experimental**. Requires rustc 1.71+.
+</Note>
+
+## Installation
+
+```toml
+[dependencies]
+tracing-flame = "0.2"
+```
+
+## What Are Flamegraphs?
+
+A **flamegraph** collapses identical call stacks and sorts frames alphabetically so you can immediately see which code paths consumed the most cumulative time. This is ideal for long-running programs or multithreaded workloads where the same logical path occurs many times.
+
+A **flamechart** preserves the exact chronological order of events so you can see *when* each span was entered relative to every other span. This is more useful when you want to trace the precise execution sequence of a single request or operation.
+
+`tracing-flame` captures data for both; the choice between flamegraph and flamechart is made at rendering time.
+
+## Setting Up the FlameLayer
+
+`FlameLayer::with_file(path)` creates a layer that writes folded stack samples to a buffered file, and returns a `FlushGuard` to ensure the buffer is flushed before the process exits:
+
+```rust
+use tracing_flame::FlameLayer;
+use tracing_subscriber::{registry::Registry, prelude::*, fmt};
+
+fn setup_global_subscriber() -> impl Drop {
+    let fmt_layer = fmt::Layer::default();
+
+    let (flame_layer, _guard) = FlameLayer::with_file("./tracing.folded").unwrap();
+
+    let subscriber = Registry::default()
+        .with(fmt_layer)
+        .with(flame_layer);
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Could not set global default");
+
+    _guard
+}
+```
+
+<Warning>
+The `FlushGuard` returned by `with_file` (or `flush_on_drop`) **must be kept alive** for the duration of the program. When using `set_global_default`, the drop implementations of layers are not automatically called at process exit, so without the guard the buffered writer may not be flushed and you will lose the tail of your trace data. Assign the guard to a variable in `main` that is dropped only after all instrumented code has finished.
+</Warning>
+
+### Providing a custom writer
+
+If you need more control over the output destination, pass any `std::io::Write` implementation to `FlameLayer::new` and call `flush_on_drop` manually to obtain a `FlushGuard`:
+
+```rust
+use std::{fs::File, io::BufWriter};
+use tracing_flame::FlameLayer;
+use tracing_subscriber::{registry::Registry, prelude::*};
+
+fn setup_global_subscriber() -> impl Drop {
+    let file = File::create("./tracing.folded").unwrap();
+    let writer = BufWriter::new(file);
+
+    let flame_layer = FlameLayer::new(writer);
+    let guard = flame_layer.flush_on_drop();
+
+    Registry::default()
+        .with(flame_layer)
+        .init();
+
+    guard
+}
+```
+
+### Configuration options
+
+`FlameLayer` exposes several builder methods to adjust what appears in the output:
+
+```rust
+let (flame_layer, _guard) = FlameLayer::with_file("./tracing.folded").unwrap();
+
+let flame_layer = flame_layer
+    // Omit idle periods where no spans are active (default: true)
+    .with_empty_samples(false)
+    // Collapse samples across threads into a single pool (default: false)
+    .with_threads_collapsed(true)
+    // Include the module path in span names (default: true)
+    .with_module_path(false)
+    // Include source file and line number (default: false)
+    .with_file_and_line(true);
+```
+
+## Complete Example
+
+The following pattern — used in the `inferno-flame` example — creates the subscriber, exercises some instrumented code, drops the guard to flush output, then generates the SVG in-process:
+
+```rust
+use std::path::Path;
+use tracing::{span, Level};
+use tracing_flame::FlameLayer;
+use tracing_subscriber::{prelude::*, registry::Registry};
+
+fn setup_global_subscriber(dir: &Path) -> impl Drop {
+    let (flame_layer, _guard) = FlameLayer::with_file(dir.join("flame.folded")).unwrap();
+
+    let subscriber = Registry::default().with(flame_layer);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    _guard
+}
+
+fn main() {
+    let tmp_dir = tempfile::Builder::new()
+        .prefix("flamegraphs")
+        .tempdir()
+        .expect("failed to create temporary directory");
+
+    let guard = setup_global_subscriber(tmp_dir.path());
+
+    span!(Level::ERROR, "outer").in_scope(|| {
+        span!(Level::ERROR, "inner").in_scope(|| {
+            span!(Level::ERROR, "innermost").in_scope(|| {
+                // work happens here
+            });
+        });
+    });
+
+    // Flush the FlameLayer's buffered writer before reading the file
+    drop(guard);
+
+    // Pass the folded file to inferno to produce an SVG …
+}
+```
+
+## Generating the Image
+
+<Steps>
+  <Step title="Install inferno">
+    ```console
+    cargo install inferno
+    ```
+  </Step>
+  <Step title="Generate a flamegraph (collapsed, sorted)">
+    ```console
+    cat tracing.folded | inferno-flamegraph > tracing-flamegraph.svg
+    ```
+    Identical stack frames are merged and sorted by name. Best for understanding overall time distribution.
+  </Step>
+  <Step title="Generate a flamechart (chronological order)">
+    ```console
+    cat tracing.folded | inferno-flamegraph --flamechart > tracing-flamechart.svg
+    ```
+    Stack frames are preserved in the exact order events were emitted. Best for tracing the execution sequence of individual requests.
+  </Step>
+</Steps>
+
+## Flamegraph vs Flamechart
+
+| | Flamegraph | Flamechart |
+|---|---|---|
+| Identical frames | Collapsed and sorted | Preserved in order |
+| Best for | Aggregate time analysis, multithreaded apps | Request tracing, sequential debugging |
+| inferno flag | *(default)* | `--flamechart` |
+
+<Tip>
+The numbers recorded in the folded output represent nanoseconds since the previous event on the same thread, not sample counts. `inferno` renders them as time proportions in the resulting SVG.
+</Tip>

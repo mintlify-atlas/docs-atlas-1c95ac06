@@ -1,0 +1,137 @@
+---
+title: "Non-Blocking File Logging with tracing-appender"
+sidebarTitle: "tracing-appender"
+description: "Write tracing events to rolling log files without blocking your application threads, using non-blocking writers and configurable rotation policies."
+---
+
+`tracing-appender` extends the tracing ecosystem with two complementary capabilities: a `RollingFileAppender` for writing events to automatically rotating log files, and a non-blocking writer that offloads all I/O to a dedicated background thread. Together they let applications capture structured diagnostics to disk with minimal impact on application latency.
+
+## Installation
+
+Add `tracing-appender` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+tracing-appender = "0.2"
+```
+
+## Rolling File Appender
+
+The `rolling` module provides convenience functions and a `RollingFileAppender` struct for writing log output to files that rotate on a schedule. Each appender is configured with a directory, a filename prefix, and a `Rotation` policy.
+
+### Rotation policies
+
+| Variant | Convenience fn | File suffix pattern |
+|---|---|---|
+| `Rotation::MINUTELY` | `rolling::minutely(dir, prefix)` | `YYYY-MM-DD-HH-MM` |
+| `Rotation::HOURLY` | `rolling::hourly(dir, prefix)` | `YYYY-MM-DD-HH` |
+| `Rotation::DAILY` | `rolling::daily(dir, prefix)` | `YYYY-MM-DD` |
+| `Rotation::NEVER` | `rolling::never(dir, prefix)` | *(no suffix)* |
+
+For example, `rolling::hourly("/var/log/myapp", "server.log")` creates files named `/var/log/myapp/server.log.2024-01-15-03` and rotates to a new file at the start of each hour.
+
+```rust
+// Hourly rotation — new file every hour
+let file_appender = tracing_appender::rolling::hourly("/some/directory", "prefix.log");
+
+// Daily rotation — new file at midnight
+let file_appender = tracing_appender::rolling::daily("/some/directory", "app.log");
+
+// No rotation — single file for the lifetime of the process
+let file_appender = tracing_appender::rolling::never("/some/directory", "app.log");
+```
+
+`RollingFileAppender` implements `std::io::Write`, so it can be passed directly to `tracing_subscriber::fmt().with_writer(...)` for blocking writes, or wrapped in a `NonBlocking` writer (see below).
+
+## Non-Blocking Writer
+
+Writing to disk on the hot path can add latency spikes to your application. `tracing_appender::non_blocking` solves this by handing each log line off to a dedicated background thread through a bounded channel and returning immediately to the caller.
+
+Calling `tracing_appender::non_blocking(writer)` returns a `(NonBlocking, WorkerGuard)` tuple:
+
+- **`NonBlocking`** — a `MakeWriter` implementation that sends log lines to the worker thread. Pass it to `.with_writer(...)` on the fmt subscriber.
+- **`WorkerGuard`** — an RAII guard that keeps the worker thread alive and, on drop, flushes any remaining buffered output. It **must be held for the lifetime of the program**.
+
+```rust
+let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+tracing_subscriber::fmt()
+    .with_writer(non_blocking)
+    .init();
+```
+
+<Warning>
+Assign the `WorkerGuard` to a named binding (e.g. `_guard`) that lives in `main`. If it is dropped immediately — for example by binding to `_` — the background thread shuts down and buffered log lines may be silently lost before they are flushed to their destination.
+</Warning>
+
+### Custom writers
+
+Any type that implements `std::io::Write + Send + 'static` can be wrapped in a non-blocking writer:
+
+```rust
+use std::io;
+
+struct MyWriter;
+
+impl io::Write for MyWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let buf_len = buf.len();
+        println!("{:?}", buf);
+        Ok(buf_len)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+let (non_blocking, _guard) = tracing_appender::non_blocking(MyWriter);
+tracing_subscriber::fmt()
+    .with_writer(non_blocking)
+    .init();
+```
+
+## Combining Rolling Files and Non-Blocking I/O
+
+The most common production setup pipes a `RollingFileAppender` through `non_blocking` so that disk I/O never blocks application threads:
+
+```rust
+fn main() {
+    let file_appender = tracing_appender::rolling::hourly("/some/directory", "prefix.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .init();
+
+    tracing::info!("application started");
+    // _guard is dropped here, flushing buffered output
+}
+```
+
+## Writing to Multiple Files
+
+`tracing-appender` integrates with `tracing-subscriber`'s `MakeWriterExt` trait, which lets you fan events out to multiple appenders — for example, routing all events to a verbose debug log while sending only warnings and errors to a separate file:
+
+```rust
+use tracing_appender::rolling;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+fn main() {
+    // Roll every minute to keep debug files small
+    let debug_file = rolling::minutely("./logs", "debug");
+    // Roll daily; only capture WARN and above
+    let warn_file = rolling::daily("./logs", "warnings")
+        .with_max_level(tracing::Level::WARN);
+
+    let all_files = debug_file.and(warn_file);
+
+    tracing_subscriber::fmt()
+        .with_writer(all_files)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+}
+```
+
+<Note>
+`with_ansi(false)` is recommended when writing to files — ANSI colour escape codes that look fine in a terminal appear as garbled characters in plain text log files.
+</Note>

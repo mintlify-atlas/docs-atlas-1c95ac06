@@ -1,0 +1,288 @@
+---
+title: "Recording Events with Tracing Macros"
+sidebarTitle: "Events"
+description: "Learn how to record structured, point-in-time events using tracing's event! macro and its level-specific shorthands: trace!, debug!, info!, warn!, and error!."
+---
+
+Events are the mechanism by which `tracing` captures discrete, point-in-time occurrences in your program's execution. Think of them as the structured evolution of traditional log lines — but instead of plain text, events carry typed key-value fields that subscribers can filter, index, and export to external systems. Every event is recorded in the context of whatever span is currently active, automatically associating it with the broader unit of work it belongs to.
+
+## What Is an Event?
+
+An `Event` represents a *moment in time* — something that happened while a trace was being recorded. Unlike a span, which has a duration, an event is instantaneous. Events are comparable to log records, but they:
+
+- Carry **structured fields** in addition to (or instead of) a free-form message.
+- Are **contextually associated** with the current span, linking them to the surrounding unit of work.
+- Use the same verbosity **levels** as spans (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`), allowing unified filtering.
+
+For example, recording an event outside and inside a span:
+
+```rust
+use tracing::{event, span, Level};
+
+// An event outside any span context
+event!(Level::INFO, "something happened");
+
+let span = span!(Level::INFO, "my_span");
+let _guard = span.enter();
+
+// An event within "my_span" — automatically associated with it
+event!(Level::DEBUG, "something happened inside my_span");
+```
+
+## The `event!` Macro
+
+The `event!` macro is the general-purpose way to record an event. It requires a `Level` as its first argument:
+
+```rust
+use tracing::{event, Level};
+
+event!(Level::INFO, "something has happened!");
+```
+
+You can also provide structured fields alongside the message:
+
+```rust
+use tracing::{event, Level};
+
+let question = "the ultimate question of life, the universe, and everything";
+let answer = 42;
+
+event!(
+    Level::DEBUG,
+    question.answer = answer,
+    question.tricky = true,
+    "the answer to {} is {}.", question, answer
+);
+```
+
+Here, `question.answer` and `question.tricky` are recorded as structured fields, while the format string creates an implicit `message` field.
+
+## Level-Specific Shorthand Macros
+
+In practice, `event!(Level::INFO, …)` is verbose. `tracing` provides five shorthand macros that have the level baked in:
+
+<CardGroup cols={2}>
+  <Card title="trace!" icon="magnifying-glass">
+    Lowest verbosity. Fine-grained execution details; typically disabled in production.
+  </Card>
+  <Card title="debug!" icon="bug">
+    Diagnostic information useful during development and troubleshooting.
+  </Card>
+  <Card title="info!" icon="circle-info">
+    General operational messages about normal program behavior.
+  </Card>
+  <Card title="warn!" icon="triangle-exclamation">
+    Potentially problematic situations that don't prevent execution.
+  </Card>
+</CardGroup>
+
+```rust
+use tracing::{trace, debug, info, warn, error};
+
+trace!("very detailed execution info");
+debug!("parsed {} items", count);
+info!(user = "ferris", "user logged in");
+warn!(attempt = 3, "retrying failed request");
+error!(code = 500, "internal server error");
+```
+
+Each of these is exactly equivalent to calling `event!` with the corresponding `Level` constant.
+
+## Field Syntax
+
+Fields provide structured context beyond a plain message. They share the same syntax used in the `span!` macro.
+
+### Key-Value Fields
+
+The basic form is `key = value`. Keys must be valid Rust identifiers (or quoted strings for names containing special characters):
+
+```rust
+use tracing::info;
+
+info!(
+    http.method = "GET",
+    http.status = 200,
+    latency_ms = 42,
+    "request completed"
+);
+```
+
+### Shorthand — Variable as Field
+
+When a local variable name matches the desired field name, you can omit the `= value` part:
+
+```rust
+use tracing::debug;
+
+let user = "ferris";
+let email = "ferris@rust-lang.org";
+
+// Equivalent to: debug!(user = user, "processing user")
+debug!(user, "processing user");
+
+// Dot-paths work too:
+// debug!(user.email = email, "processing user")
+debug!(user.email = email, "processing user");
+```
+
+### `?` — Debug Formatting
+
+Prefix a value with `?` to record it using its `fmt::Debug` implementation:
+
+```rust
+use tracing::info;
+
+#[derive(Debug)]
+struct Config { port: u16, host: String }
+
+let cfg = Config { port: 8080, host: "localhost".into() };
+
+// cfg is recorded via Debug
+info!(config = ?cfg, "server starting");
+// equivalent to:
+// info!(config = tracing::field::debug(&cfg), "server starting");
+```
+
+### `%` — Display Formatting
+
+Prefix with `%` to record using `fmt::Display` instead:
+
+```rust
+use tracing::warn;
+
+let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+// addr is recorded via Display
+warn!(peer = %addr, "connection refused");
+// equivalent to:
+// warn!(peer = tracing::field::display(&addr), "connection refused");
+```
+
+The `?` and `%` sigils also work with the shorthand variable syntax:
+
+```rust
+use tracing::debug;
+
+#[derive(Debug)]
+struct MyStruct { field: &'static str }
+
+let my_struct = MyStruct { field: "Hello world!" };
+
+// Uses Debug for the whole struct
+debug!(?my_struct);
+// Uses Display for a specific field
+debug!(%my_struct.field);
+```
+
+### The `message` Field
+
+When a format string appears after fields, `tracing` creates an implicit field named `message`:
+
+```rust
+use tracing::info;
+
+let user_id = 42u64;
+
+// Creates fields: user_id = 42, message = "processing user 42"
+info!(user_id, "processing user {}", user_id);
+```
+
+This does **not** allocate by default — the format arguments are passed by reference.
+
+## Events vs. Log Messages
+
+A key advantage of structured events over plain log strings is that subscribers can inspect individual fields:
+
+```rust
+use tracing::{info, warn};
+
+// ❌ Unstructured — hard to parse programmatically
+// log::info!("Request from 127.0.0.1 completed in 42ms with status 200");
+
+// ✅ Structured — each piece of data is individually accessible
+info!(
+    peer_addr = "127.0.0.1",
+    duration_ms = 42u64,
+    status = 200u16,
+    "request completed"
+);
+
+// A subscriber can now filter on `status >= 400`, index `duration_ms`, etc.
+```
+
+Subscribers such as `tracing-subscriber`'s JSON formatter, `tracing-opentelemetry`, or custom backends can all access these fields independently.
+
+## Target — Overriding the Module Path
+
+Every event has a *target* that defaults to the module path where the macro was invoked. This is used by subscribers to categorize or filter events:
+
+```rust
+use tracing::info;
+
+// Default target: the current module path (e.g., "my_crate::server")
+info!("server started");
+
+// Override the target explicitly
+info!(target: "app_events", "server started");
+```
+
+This is particularly useful in libraries that want to emit events under a consistent target regardless of which module they come from.
+
+## Putting It Together — A Complete Example
+
+This pattern appears throughout the `tracing` repository examples, showing fields, format messages, Debug formatting, and shorthand all in a single function:
+
+```rust
+use tracing::{debug, error, info, warn};
+use tracing_attributes::instrument;
+
+#[instrument]
+pub fn shave(yak: usize) -> Result<(), Box<dyn std::error::Error + 'static>> {
+    // Fields and a message together; `excitement` is key=value, the string is `message`
+    debug!(excitement = "yay!", "hello! I'm gonna shave a yak.");
+
+    if yak == 3 {
+        warn!("could not locate yak!");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "shaving yak failed!",
+        ).into());
+    } else {
+        debug!("yak shaved successfully");
+    }
+    Ok(())
+}
+
+pub fn shave_all(yaks: usize) -> usize {
+    let mut yaks_shaved = 0;
+
+    for yak in 1..=yaks {
+        let res = shave(yak);
+
+        // Shorthand: `yak` becomes field `yak = yak`
+        debug!(yak, shaved = res.is_ok());
+
+        if let Err(ref e) = res {
+            // `yak` shorthand + explicit field + message
+            error!(yak, error = e.as_ref(), "failed to shave yak!");
+        } else {
+            yaks_shaved += 1;
+        }
+        debug!(yaks_shaved);
+    }
+    yaks_shaved
+}
+```
+
+<Note>
+Events always record in the context of the **current span**. If no span is active, the event is recorded at the root of the trace tree. Subscribers receive both the event's own fields and the fields of the surrounding span hierarchy.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Spans" icon="clock" href="/instrumentation/spans">
+    Understand spans — the execution context that surrounds your events
+  </Card>
+  <Card title="#[instrument]" icon="tag" href="/instrumentation/instrument-macro">
+    Auto-instrument functions to create spans and record arguments as fields
+  </Card>
+</CardGroup>

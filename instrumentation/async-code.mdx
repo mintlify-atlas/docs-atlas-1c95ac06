@@ -1,0 +1,266 @@
+---
+title: "Tracing Async Code and Futures in Rust"
+sidebarTitle: "Async Code"
+description: "Understand why Span::enter() is unsafe across await points, and learn the correct patterns for instrumenting async Rust code with tracing spans."
+---
+
+Tracing async code in Rust requires a slightly different mental model from synchronous tracing. In synchronous code, a function runs from start to finish on a single thread, so a span guard held across the whole function body works perfectly. In async code, a future can be polled — and therefore paused — many times before it completes. Each time the runtime parks your future to run something else, the span guard is still alive but the executing thread has moved on to a different task. This mismatch between span entry and thread execution is the source of the most common tracing mistake in async Rust.
+
+## Why Async Tracing Is Different
+
+In Rust's async model, a future represents a unit of work that is executed cooperatively. When a future yields (at an `.await` point), the runtime can execute other futures on the same thread. This means that any state held across an `.await` — including a `Span::enter()` guard — persists on the stack even while a different task runs.
+
+From a tracing perspective, this is a problem: the span is still *entered* on that thread, but the logical unit of work (your future) is no longer executing. Any events recorded by other tasks on that thread will incorrectly appear to be inside your span.
+
+```
+Thread 1 timeline (broken):
+  [enter "my_span"]
+  ...
+  .await  <-- future yields, but _enter guard is still alive
+  [another task's event is recorded — INCORRECTLY inside "my_span"]
+  ...
+  [future resumes]
+  [drop _enter, exit "my_span"]
+```
+
+## The Anti-Pattern: `Span::enter()` Across `.await`
+
+<Warning>
+**Never hold a `Span::enter()` guard across an `.await` point.** The guard returned by `Span::enter()` (both `Entered` and `EnteredSpan`) is `!Send` precisely to reduce the risk of this mistake, but it can still occur within a single-threaded or `!Send` async context.
+</Warning>
+
+Here is the incorrect pattern:
+
+```rust
+use tracing::info_span;
+
+async fn some_other_async_function() { /* ... */ }
+
+async fn my_async_function() {
+    let span = info_span!("my_async_function");
+
+    // ⚠️ WARNING: This guard will remain active until it is dropped...
+    let _enter = span.enter();
+
+    // ...but this await point may yield, causing the runtime to switch to
+    // another task while still inside the span!
+    some_other_async_function().await;
+    // ^^^ The span is still "entered" during the above suspension!
+}
+```
+
+The Rust compiler will not catch this by default. However, you can configure `clippy` to warn about it by adding the following to your `clippy.toml`:
+
+```toml
+await-holding-invalid-types = [
+    { path = "tracing::span::Entered", reason = "spans must be entered and exited on the same thread, entered guards should not be held across '.await' points" },
+    { path = "tracing::span::EnteredSpan", reason = "spans must be entered and exited on the same thread, entered guards should not be held across '.await' points" },
+]
+```
+
+## The Correct Approach: `#[instrument]`
+
+<Tip>
+`#[instrument]` on an `async fn` is the simplest, most correct solution. The macro generates code that uses the `Instrument` combinator under the hood, ensuring the span is entered and exited on each individual poll — never held across a yield point.
+</Tip>
+
+```rust
+use tracing::instrument;
+
+#[instrument]
+async fn connect(addr: &std::net::SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    // The span is entered when this future is polled and exited every time it yields.
+    // If we suspend here, the span is correctly exited and re-entered on the next poll.
+    let stream = tokio::net::TcpStream::connect(addr).await;
+    tracing::info!("created stream");
+    stream
+}
+
+#[instrument]
+async fn write(stream: &mut tokio::net::TcpStream) -> std::io::Result<usize> {
+    let result = stream.write(b"hello world\n").await;
+    tracing::info!("wrote to stream; success={:?}", result.is_ok());
+    result
+}
+```
+
+This pattern, taken directly from the `async-fn` example in the tracing repository, requires no manual span management at all — the attribute handles everything correctly.
+
+## The `Instrument` Trait — Manual Future Instrumentation
+
+When you can't use `#[instrument]` (for example, on a closure, an async block, or a third-party future), the [`Instrument`](https://docs.rs/tracing/latest/tracing/trait.Instrument.html) trait provides the `.instrument(span)` combinator. It wraps a `Future` so that the span is entered on every poll and exited whenever the future yields:
+
+```rust
+use tracing::{info_span, Instrument};
+
+async fn some_other_async_function() { /* ... */ }
+
+async fn my_async_function() {
+    let span = info_span!("my_async_function");
+
+    async move {
+        // Every time this block is polled, the span is entered.
+        // Every time it yields, the span is exited.
+        some_other_async_function().await;
+        // More async work inside the span...
+    }
+    .instrument(span)
+    .await
+}
+```
+
+You can also instrument a call to an existing async function at the call site:
+
+```rust
+use tracing::{debug_span, Instrument};
+
+async fn some_other_async_function() { /* ... */ }
+
+async fn my_async_function() {
+    let some_value = some_other_async_function()
+        .instrument(debug_span!("some_other_async_function"))
+        .await;
+
+    // ...
+}
+```
+
+## `in_current_span()` — Propagating the Active Span
+
+`Instrument` also provides `.in_current_span()`, a shorthand that instruments the future with *whatever span is currently active* at the time of the call. This is useful for propagating context to spawned futures:
+
+```rust
+use tracing::{info_span, Instrument};
+
+async fn my_task() {
+    tracing::debug!("this event will occur inside the parent span");
+}
+
+async fn spawn_work() {
+    let span = info_span!("my_span");
+    let _enter = span.enter();
+
+    // Capture the current span and attach it to the spawned future
+    let future = async {
+        tracing::debug!("inside the spawned task, still within my_span");
+    };
+
+    tokio::spawn(future.in_current_span());
+}
+```
+
+## Spawning Tokio Tasks with `Instrument`
+
+When spawning tasks with `tokio::spawn`, the new task starts with no active span — the Tokio runtime does not propagate spans across `spawn` boundaries automatically. You must attach a span explicitly:
+
+```rust
+use tracing::{info_span, Instrument};
+
+async fn handle_connection() {
+    tracing::info!("handling connection");
+}
+
+async fn listener() {
+    // Each spawned handler gets its own span, linked to the listener's context
+    let span = info_span!("handle_connection", peer_addr = "127.0.0.1");
+    tokio::spawn(handle_connection().instrument(span));
+}
+```
+
+### Using `or_current()` for Graceful Fallback
+
+If the span you pass to `.instrument()` might be disabled (for example, a `DEBUG` span in a production system with `INFO` filtering), you can use `Span::or_current()` to fall back to the current span rather than losing context entirely:
+
+```rust
+use tracing::{debug_span, info_span, Instrument};
+
+async fn my_async_fn() { /* ... */ }
+
+async fn spawn_work() {
+    let _parent_span = info_span!("parent").entered();
+
+    // If "child" is disabled, the task still inherits "parent"
+    tokio::spawn(
+        my_async_fn().instrument(debug_span!("child").or_current())
+    );
+}
+```
+
+## `Span::in_scope()` for Synchronous Sections
+
+If you have a small *synchronous* section inside an async function that you want to instrument — and you want to avoid the full `.instrument()` combinator — use `Span::in_scope()`. Because `in_scope` takes a regular (non-async) closure, the span is exited when the closure returns, which always happens before the next await point:
+
+```rust
+use tracing::info_span;
+
+async fn my_async_function() {
+    let span = info_span!("sync_section");
+
+    // The closure runs synchronously; span is exited before we reach any `.await`
+    let some_value = span.in_scope(|| {
+        // synchronous work only — no await here!
+        42
+    });
+
+    // The span is already exited; it's safe to await now
+    some_async_function(some_value).await;
+}
+
+async fn some_async_function(_: i32) {}
+```
+
+## Summary of Correct Async Patterns
+
+<Steps>
+  <Step title="Prefer #[instrument] on async fn">
+    The macro generates correct enter/exit behavior automatically and is the recommended approach for async functions you own.
+
+    ```rust
+    #[tracing::instrument]
+    async fn my_async_function() {
+        some_other_async_function().await;
+    }
+    ```
+  </Step>
+  <Step title="Use .instrument(span) on futures and async blocks">
+    When you cannot annotate the function directly, attach a span to a future before awaiting it using the `Instrument` trait.
+
+    ```rust
+    use tracing::Instrument;
+
+    my_future
+        .instrument(tracing::info_span!("my_span"))
+        .await;
+    ```
+  </Step>
+  <Step title="Use .in_current_span() to propagate context to spawned tasks">
+    When spawning tasks (e.g., with `tokio::spawn`), attach the current span so the spawned work appears within the correct trace context.
+
+    ```rust
+    use tracing::Instrument;
+
+    tokio::spawn(my_future.in_current_span());
+    ```
+  </Step>
+  <Step title="Use Span::in_scope() for synchronous sections inside async code">
+    For synchronous work inside an async function, use `in_scope` to ensure the span is exited before any `.await` point.
+
+    ```rust
+    let result = span.in_scope(|| do_sync_work());
+    some_async_fn(result).await;
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**The one pattern to always avoid:** holding the guard returned by `Span::enter()` or `Span::entered()` across a `.await` point. It compiles without error but produces incorrect, misleading traces.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="#[instrument]" icon="tag" href="/instrumentation/instrument-macro">
+    Full reference for all #[instrument] options including async support
+  </Card>
+  <Card title="Spans" icon="clock" href="/instrumentation/spans">
+    Understand span entry, exit, and RAII guards in synchronous code
+  </Card>
+</CardGroup>

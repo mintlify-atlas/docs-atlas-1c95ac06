@@ -1,47 +1,241 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Tracing in Rust"
+sidebarTitle: "Quickstart"
+description: "Add tracing to a Rust project in five steps: declare dependencies, initialize a subscriber, emit events, create spans, and run with RUST_LOG filtering."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through adding `tracing` to a Rust project from scratch. By the end you will have a working binary that emits structured, leveled diagnostic output to your terminal and a library that instruments its own functions — all without coupling the two together.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+**Libraries vs. applications**: Libraries should depend only on the `tracing` crate and use its macros freely. Applications are responsible for choosing and installing a `Subscriber`. Never call `tracing_subscriber::fmt::init()` (or any other global-default setter) inside library code — doing so prevents downstream applications from configuring their own subscriber.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Add Dependencies to Cargo.toml
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Open your `Cargo.toml` and add both `tracing` and `tracing-subscriber`. Libraries only need `tracing`; the subscriber is an application-level concern.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+**Application `Cargo.toml`:**
+
+```toml
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
+```
+
+**Library `Cargo.toml`:**
+
+```toml
+[dependencies]
+tracing = "0.1"
+```
+
+`tracing-subscriber` ships with a `fmt` subscriber that formats trace data as human-readable text, reads the `RUST_LOG` environment variable for filtering, and writes to stderr by default.
+
+### Initialize the Subscriber
+
+In your application's `main` function, initialize the subscriber before any other code runs. The one-liner `tracing_subscriber::fmt::init()` reads the `RUST_LOG` environment variable and sets the subscriber as the process-wide default.
+
+```rust
+fn main() {
+    // Reads RUST_LOG for level/target filters.
+    // Falls back to INFO if RUST_LOG is not set.
+    tracing_subscriber::fmt::init();
+
+    // Your application code starts here.
+    run();
+}
+```
+
+For more control — for example, to force a specific maximum level — build the subscriber explicitly:
+
+```rust
+use tracing::Level;
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(Level::TRACE)
+        .init();
+
+    run();
+}
+```
+
+### Emit Events with the Level Macros
+
+`tracing` provides five shorthand event macros that mirror the log levels you already know. Use them anywhere in your code — inside spans or at the top level:
+
+```rust
+use tracing::{trace, debug, info, warn, error};
+
+fn process_order(order_id: u64, items: usize) {
+    trace!(order_id, "entered process_order");
+    debug!(order_id, item_count = items, "processing items");
+    info!(order_id, "order processing started");
+
+    if items == 0 {
+        warn!(order_id, "order has no items");
+        return;
+    }
+
+    // ... do work ...
+
+    info!(order_id, status = "complete", "order processed successfully");
+}
+
+fn main() {
+    tracing_subscriber::fmt::init();
+    process_order(1001, 3);
+    process_order(1002, 0);
+}
+```
+
+Fields are recorded as structured key-value pairs. Local variable names can be used as a shorthand — `order_id` above is equivalent to writing `order_id = order_id`.
+
+### Create Spans
+
+A span represents a _period of time_ with a beginning and an end. Use the `span!` macro (or the level-specific `info_span!`, `debug_span!`, etc.) to create one. Calling `.enter()` returns a RAII guard that exits the span when it drops.
+
+```rust
+use tracing::{info, info_span, span, Level};
+
+fn shave_yaks(yaks: usize) -> usize {
+    // Create a span with a structured field.
+    let span = span!(Level::TRACE, "shaving_yaks", yaks);
+    let _enter = span.enter();  // span is active until _enter is dropped
+
+    info!("beginning yak shave");
+
+    let mut shaved = 0;
+    for yak in 1..=yaks {
+        let yak_span = info_span!("shave", yak);
+        let _y = yak_span.enter();
+        info!("shaving yak");
+        shaved += 1;
+    }
+
+    shaved
+}
+```
+
+For functions, the `#[instrument]` attribute is even more ergonomic — it wraps the entire function body in a span named after the function and automatically records the function's arguments as fields:
+
+```rust
+use tracing::{debug, warn, instrument};
+use std::{error::Error, io};
+
+#[instrument]
+pub fn shave(yak: usize) -> Result<(), Box<dyn Error + 'static>> {
+    debug!(excitement = "yay!", "hello! I'm gonna shave a yak.");
+    if yak == 3 {
+        warn!("could not locate yak!");
+        return Err(io::Error::new(io::ErrorKind::Other, "shaving yak failed!").into());
+    } else {
+        debug!("yak shaved successfully");
+    }
+    Ok(())
+}
+```
+
+<Warning>
+**Async code**: Do not hold a `Span::enter()` guard across an `.await` point. The guard will keep the span active across unrelated polls, producing incorrect traces. Use the `#[instrument]` attribute for `async fn`s, or attach spans to futures using the `.instrument()` combinator from the `tracing::Instrument` trait.
+</Warning>
+
+### Run with RUST_LOG
+
+The `RUST_LOG` environment variable controls which spans and events are shown. It accepts a comma-separated list of `target=level` directives, where `target` is typically a crate or module name.
+
+```bash
+# Show everything at DEBUG level and above
+RUST_LOG=debug cargo run
+
+# Show only your crate at TRACE, everything else at WARN
+RUST_LOG=warn,my_crate=trace cargo run
+
+# Show a specific module
+RUST_LOG=my_crate::orders=debug cargo run
+```
+
+Example terminal output from `RUST_LOG=debug cargo run`:
+
+```
+2024-01-15T10:23:01.456Z DEBUG my_crate: entered process_order order_id=1001
+2024-01-15T10:23:01.456Z DEBUG my_crate: processing items order_id=1001 item_count=3
+2024-01-15T10:23:01.456Z  INFO my_crate: order processing started order_id=1001
+2024-01-15T10:23:01.457Z  INFO my_crate: order processed successfully order_id=1001 status="complete"
+2024-01-15T10:23:01.457Z  WARN my_crate: order has no items order_id=1002
+```
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Complete Working Example
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+Here is a self-contained example combining all the pieces — a small library crate with `#[instrument]` and an application `main` that initialises the subscriber:
+
+```rust
+use tracing::{debug, error, info, warn, instrument, Level};
+use tracing::{span};
+use std::{error::Error, io};
+
+// ── Library code ─────────────────────────────────────────────────────────────
+
+#[instrument]
+pub fn shave(yak: usize) -> Result<(), Box<dyn Error + 'static>> {
+    debug!(excitement = "yay!", "hello! I'm gonna shave a yak.");
+    if yak == 3 {
+        warn!("could not locate yak!");
+        return Err(io::Error::new(io::ErrorKind::Other, "shaving yak failed!").into());
+    } else {
+        debug!("yak shaved successfully");
+    }
+    Ok(())
+}
+
+pub fn shave_all(yaks: usize) -> usize {
+    let span = span!(Level::TRACE, "shaving_yaks", yaks);
+    let _enter = span.enter();
+
+    info!("shaving yaks");
+
+    let mut yaks_shaved = 0;
+    for yak in 1..=yaks {
+        let res = shave(yak);
+        debug!(yak, shaved = res.is_ok());
+
+        if let Err(ref e) = res {
+            error!(yak, error = e.as_ref(), "failed to shave yak!");
+        } else {
+            yaks_shaved += 1;
+        }
+        debug!(yaks_shaved);
+    }
+
+    yaks_shaved
+}
+
+// ── Application code ─────────────────────────────────────────────────────────
+
+fn main() {
+    tracing_subscriber::fmt::init();
+
+    let number_of_yaks = 3;
+    info!(number_of_yaks, "preparing to shave yaks");
+
+    let number_shaved = shave_all(number_of_yaks);
+    info!(
+        all_yaks_shaved = number_shaved == number_of_yaks,
+        "yak shaving completed."
+    );
+}
+```
+
+Run it with:
+
+```bash
+RUST_LOG=debug cargo run
+```
+
+<Tip>
+Set `RUST_LOG=trace` to see the `TRACE`-level spans including the `shaving_yaks` span and individual field values recorded on entry.
 </Tip>

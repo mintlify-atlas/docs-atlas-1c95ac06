@@ -1,0 +1,297 @@
+---
+title: "Formatting Traces with the fmt Subscriber"
+sidebarTitle: "fmt Subscriber"
+description: "Configure tracing-subscriber's fmt subscriber to print structured trace events as human-readable or JSON output in Rust."
+---
+
+The `tracing_subscriber::fmt` module provides a `Subscriber` implementation that formats trace events as line-oriented log output and writes them to a configurable sink. It is the most common starting point for adding observability to a Rust application: a single call sets up filtering via `RUST_LOG` and formatted output to stdout, while a rich builder API gives you fine-grained control over timestamps, log levels, thread information, output format, and destination.
+
+## Quick Initialisation
+
+For the fastest possible setup, call `tracing_subscriber::fmt::init()`. This installs a global subscriber that reads the `RUST_LOG` environment variable to determine which spans and events to enable (via `EnvFilter`), and prints them to stdout in the default `Full` format:
+
+```rust
+fn main() {
+    tracing_subscriber::fmt::init();
+
+    tracing::info!("application started");
+}
+```
+
+Run your binary with `RUST_LOG=debug cargo run` to see debug-level output. If `RUST_LOG` is not set, only `ERROR`-level events are shown by default.
+
+<Note>
+`fmt::init()` is shorthand for `tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init()`. It requires the `env-filter` feature flag (enabled by default in most configurations).
+</Note>
+
+## Builder API
+
+For more control, use `tracing_subscriber::fmt()` to obtain a `SubscriberBuilder`. Chain configuration methods and finish with `.init()` to install globally, `.try_init()` to install and surface errors, or `.finish()` to construct the subscriber without installing it:
+
+```rust
+use tracing_subscriber::fmt;
+use tracing::Level;
+
+fn main() {
+    fmt()
+        .with_max_level(Level::DEBUG)
+        .with_target(false)
+        .with_thread_ids(true)
+        .init();
+
+    tracing::debug!("subscriber is ready");
+}
+```
+
+From the `fmt.rs` example in the repository:
+
+```rust
+fn main() {
+    tracing_subscriber::fmt()
+        // enable everything
+        .with_max_level(tracing::Level::TRACE)
+        // sets this to be the default, global subscriber for this application.
+        .init();
+
+    let number_of_yaks = 3;
+    tracing::info!(number_of_yaks, "preparing to shave yaks");
+}
+```
+
+## Output Formats
+
+The `fmt` subscriber ships with four built-in output formatters. Use the `<Tabs>` below to see how the same event looks in each format.
+
+<Tabs>
+  <Tab title="Full (default)">
+    **Human-readable, one line per event.** Includes the timestamp, log level, target module path, span context, and event fields. This is the default format — no extra configuration needed.
+
+    ```rust
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+    ```
+
+    Example output:
+    ```
+    2024-01-15T10:23:45.123456Z  INFO my_app: server listening on 0.0.0.0:8080
+    2024-01-15T10:23:45.124000Z DEBUG my_app::handler: processing request method="GET" path="/health"
+    ```
+  </Tab>
+  <Tab title="Compact">
+    **Shorter output.** Appends span fields directly to each event line rather than printing span context separately. Useful when log lines need to stay narrow.
+
+    ```rust
+    tracing_subscriber::fmt()
+        .compact()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+    ```
+
+    Or using `format()` explicitly:
+
+    ```rust
+    use tracing_subscriber::fmt;
+
+    let format = fmt::format()
+        .with_target(false)
+        .compact();
+
+    tracing_subscriber::fmt()
+        .event_format(format)
+        .init();
+    ```
+
+    Example output:
+    ```
+    2024-01-15T10:23:45Z  INFO server listening on 0.0.0.0:8080
+    2024-01-15T10:23:45Z DEBUG processing request; method="GET" path="/health"
+    ```
+  </Tab>
+  <Tab title="Pretty">
+    **Multi-line, human-readable output.** Optimised for local development and debugging. Each event is expanded across multiple lines with generous whitespace for readability. Requires the `ansi` feature flag.
+
+    ```rust
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+    ```
+
+    Example output:
+    ```
+    2024-01-15T10:23:45.123456Z  INFO my_app: server listening
+      at src/main.rs:42
+      in my_app::setup
+
+      addr: "0.0.0.0:8080"
+    ```
+  </Tab>
+  <Tab title="JSON">
+    **Newline-delimited JSON.** Each event is a single JSON object on one line, suitable for ingestion by log aggregation systems like Elasticsearch, Loki, or Datadog. Requires the `json` feature flag.
+
+    ```rust
+    // Cargo.toml: tracing-subscriber = { version = "0.3", features = ["json"] }
+
+    tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+    ```
+
+    From the `fmt-json.rs` example in the repository:
+
+    ```rust
+    fn main() {
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::TRACE)
+            .with_current_span(false)
+            .init();
+
+        let number_of_yaks = 3;
+        tracing::info!(number_of_yaks, "preparing to shave yaks");
+    }
+    ```
+
+    Example output:
+    ```json
+    {"timestamp":"2024-01-15T10:23:45.123456Z","level":"INFO","fields":{"message":"preparing to shave yaks","number_of_yaks":3},"target":"my_app"}
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration Methods
+
+`SubscriberBuilder` exposes a wide range of configuration methods. All of them return the builder so calls can be chained:
+
+### Level Filtering
+
+```rust
+use tracing::Level;
+use tracing_subscriber::filter::LevelFilter;
+
+// Enable up to DEBUG
+tracing_subscriber::fmt()
+    .with_max_level(Level::DEBUG)
+    .init();
+
+// Disable all output
+tracing_subscriber::fmt()
+    .with_max_level(LevelFilter::OFF)
+    .finish();
+```
+
+### Event Metadata
+
+```rust
+tracing_subscriber::fmt()
+    // Include/exclude the event's target (module path)
+    .with_target(true)
+    // Include the source file name
+    .with_file(true)
+    // Include the source line number
+    .with_line_number(true)
+    // Include/exclude the log level label
+    .with_level(true)
+    .init();
+```
+
+### Thread Information
+
+```rust
+tracing_subscriber::fmt()
+    // Print the OS thread ID alongside each event
+    .with_thread_ids(true)
+    // Print the thread name (if one is set)
+    .with_thread_names(true)
+    .init();
+```
+
+### ANSI Colours
+
+```rust
+// Requires the `ansi` feature flag. Disable for plain text output.
+tracing_subscriber::fmt()
+    .with_ansi(false)
+    .init();
+```
+
+### Span Lifecycle Events
+
+By default, `fmt` only emits log lines for `event!` calls; it does not synthesise events when spans are created, entered, or closed. Use `with_span_events` to change this:
+
+```rust
+use tracing_subscriber::fmt::format::FmtSpan;
+
+tracing_subscriber::fmt()
+    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+    .init();
+```
+
+The `CLOSE` event includes busy time and idle time when timestamps are enabled.
+
+## Writing to stderr or a File
+
+By default the `fmt` subscriber writes to `io::stdout`. Use `.with_writer()` to redirect output:
+
+```rust
+use std::io;
+
+// Write to stderr
+tracing_subscriber::fmt()
+    .with_writer(io::stderr)
+    .init();
+```
+
+```rust
+use std::fs::File;
+use std::sync::Arc;
+
+// Write to a file
+let file = File::create("app.log").expect("failed to create log file");
+
+tracing_subscriber::fmt()
+    .with_writer(Arc::new(file))
+    .init();
+```
+
+<Warning>
+When writing to a `File` directly, output is buffered by the OS. For non-blocking, asynchronous log file writing use the `tracing-appender` crate's `non_blocking` writer.
+</Warning>
+
+## Using `fmt::Layer` in a Layered Stack
+
+When building a layered subscriber with `Registry`, use `tracing_subscriber::fmt::layer()` instead of the builder. This returns an `fmt::Layer` that can be composed with other layers using `.with()`:
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+let fmt_layer = fmt::layer()
+    .with_target(false);
+
+let filter_layer = EnvFilter::try_from_default_env()
+    .or_else(|_| EnvFilter::try_new("info"))
+    .unwrap();
+
+tracing_subscriber::registry()
+    .with(filter_layer)
+    .with(fmt_layer)
+    .init();
+```
+
+`fmt::layer()` supports the same configuration methods as `SubscriberBuilder`, allowing you to call `.compact()`, `.pretty()`, `.json()`, `.with_writer()`, and so on.
+
+## Test Output Capture
+
+When running under `cargo test`, use `.with_test_writer()` so that tracing output is captured per-test and only shown on failure:
+
+```rust
+use tracing::subscriber;
+
+subscriber::set_default(
+    tracing_subscriber::fmt()
+        .with_test_writer()
+        .finish()
+);
+```

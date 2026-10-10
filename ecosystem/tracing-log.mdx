@@ -1,0 +1,118 @@
+---
+title: "Bridging the log Crate with tracing-log"
+sidebarTitle: "tracing-log"
+description: "Consume log records from dependencies inside a tracing subscriber, or emit tracing events that remain visible to log-based tooling — all via tracing-log."
+---
+
+`tracing-log` provides compatibility layers between Rust's two diagnostic ecosystems: the widely-used [`log`](https://crates.io/crates/log) facade and the structured [`tracing`](https://crates.io/crates/tracing) framework. Without it, an application that uses a `tracing` subscriber will silently drop any `log::info!` or `log::warn!` calls made by its dependencies, and a library that wants to emit `tracing` events will be invisible to tools that only know about `log`. This crate solves both directions of that interoperability problem.
+
+## Two Use Cases
+
+### Use case 1 — Application uses tracing, dependencies use log
+
+Your application sets up a `tracing` subscriber (`tracing_subscriber::fmt`, OpenTelemetry, etc.) but some of your dependencies call `log::warn!` or `log::error!`. Install `LogTracer` as the global `log` logger so those records are forwarded into your `tracing` subscriber as `tracing::Event`s:
+
+```toml
+[dependencies]
+tracing        = "0.1"
+tracing-subscriber = "0.3"
+tracing-log    = "0.2"
+log            = "0.4"
+```
+
+```rust
+use tracing_log::LogTracer;
+
+fn main() {
+    // Forward all log records to the active tracing subscriber
+    LogTracer::init().expect("failed to set logger");
+
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+
+    // This log record is now visible in the tracing subscriber's output,
+    // and is attached to whatever tracing span is currently active.
+    log::debug!("this is a log line");
+    tracing::debug!("this is a tracing line");
+}
+```
+
+<Note>
+`tracing-subscriber`'s `fmt` subscriber enables the `tracing-log` compatibility integration by default (via the `tracing-log` feature flag on `tracing-subscriber`). In many applications you can call `tracing_subscriber::fmt::init()` and `log` records will be captured automatically without a separate `LogTracer::init()` call.
+</Note>
+
+### Use case 2 — Library emits tracing events, callers use log
+
+If you are writing a library and want your `tracing` instrumentation to appear in applications that use `log`-based tooling (e.g. `env_logger`), enable the `log` or `log-always` feature on the `tracing` crate:
+
+```toml
+[dependencies]
+# Emit log records whenever no tracing subscriber is active
+tracing = { version = "0.1", features = ["log"] }
+
+# Always emit log records, even when a tracing subscriber is active
+# tracing = { version = "0.1", features = ["log-always"] }
+```
+
+With `log` enabled, every `tracing::event!` call falls back to emitting a `log::Record` when no `tracing` subscriber is listening, ensuring downstream consumers that only know about `log` still see your diagnostics.
+
+## LogTracer Configuration
+
+For more control, use `LogTracer::builder()` instead of `LogTracer::init()`:
+
+```rust
+use tracing_log::LogTracer;
+
+LogTracer::builder()
+    // Discard log records more verbose than INFO before they reach tracing.
+    // Useful when dependencies are very chatty at DEBUG/TRACE.
+    .with_max_level(log::LevelFilter::Info)
+    // Ignore records from a crate that already uses tracing's `log` feature
+    // to avoid double-recording the same events.
+    .ignore_crate("hyper")
+    .init()
+    .expect("failed to set logger");
+```
+
+The builder's key methods:
+
+| Method | Description |
+|---|---|
+| `.with_max_level(filter)` | Drop log records above the given verbosity level before forwarding. |
+| `.ignore_crate(name)` | Silently discard records whose target starts with `name`. Useful when a crate enables `tracing/log` and would otherwise be recorded twice. |
+| `.ignore_all(crates)` | Convenience variant accepting an iterator of crate names. |
+
+## Caution: Mixing Both Conversions
+
+`log` → `tracing` → `log` forms an infinite loop. If you install `LogTracer` (which converts `log` records into `tracing` events) and also use a subscriber that converts `tracing` events back into `log` records, every event will recurse between the two until the call stack overflows.
+
+<Warning>
+Do **not** use `LogTracer` together with a `tracing` subscriber that re-emits events through the `log` crate. If you need both ecosystems simultaneously, add a level of filtering to break the cycle, or rely solely on `tracing-subscriber`'s built-in `log` support rather than installing `LogTracer` manually.
+</Warning>
+
+## Feature Flags
+
+`tracing-log` exposes the following Cargo features:
+
+| Feature | Default | Description |
+|---|---|---|
+| `std` | ✅ | Enables features requiring the Rust standard library. |
+| `log-tracer` | ✅ | Provides the `LogTracer` type. |
+| `interest-cache` | ❌ | Adds a per-thread LRU cache to speed up interest checks for `log` records (requires `std`). |
+
+## AsLog and AsTrace Conversion Traits
+
+For lower-level use cases, `tracing-log` also exports `AsLog` and `AsTrace` traits that convert between `tracing` and `log` metadata and level types:
+
+```rust
+use tracing_log::{AsLog, AsTrace};
+
+// Convert a tracing level to a log level
+let log_level: log::Level = tracing::Level::WARN.as_log();
+
+// Convert a log level to a tracing level
+let tracing_level: tracing_core::Level = log::Level::Info.as_trace();
+```
+
+These are primarily useful when building custom subscriber layers or formatters that need to interoperate with `log`-aware infrastructure.

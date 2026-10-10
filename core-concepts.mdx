@@ -1,0 +1,325 @@
+---
+title: "Core Concepts: Spans, Events, and Subscribers"
+sidebarTitle: "Core Concepts"
+description: "Learn tracing's core primitives: spans model durations, events mark moments, subscribers collect data, levels filter noise, and fields carry typed context."
+---
+
+`tracing`'s design is built around three interlocking primitives — **spans**, **events**, and **subscribers** — plus two supporting concepts — **levels** and **fields** — that give every piece of diagnostic data its verbosity and its structured payload. Understanding how these five pieces fit together will help you instrument code correctly, filter output efficiently, and build or choose the right subscriber for your application.
+
+## Spans
+
+A span represents a _period of time_ with a beginning and an end. Unlike a log message that captures a single instant, a span captures the entire duration of a unit of work: an HTTP request handler, a database query, a loop iteration, or any other logical scope you care to name.
+
+### Creating and Entering a Span
+
+Use the `span!` macro to construct a `Span` value, then call `span.enter()` to begin recording work inside it. `enter()` returns a RAII guard; when the guard is dropped the span is exited.
+
+```rust
+use tracing::{span, Level};
+
+let span = span!(Level::TRACE, "my_span");
+// `enter` returns a guard. The span is active for as long as the guard lives.
+let _enter = span.enter();
+
+// All events recorded here are associated with "my_span".
+```
+
+Level-specific convenience macros (`trace_span!`, `debug_span!`, `info_span!`, `warn_span!`, `error_span!`) reduce verbosity:
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("load_config", path = "/etc/app/config.toml");
+let _guard = span.enter();
+```
+
+### Span Lifecycle
+
+A span goes through three phases:
+
+1. **Created** — `Span::new()` / `span!()` constructs the span and notifies the subscriber via `new_span()`.
+2. **Entered / Exited** — `span.enter()` notifies the subscriber via `enter()` and `exit()`. A span may be entered and exited many times.
+3. **Closed** — When the last `Span` handle is dropped the subscriber's `try_close()` is called and the span's data may be freed.
+
+### Nesting
+
+Spans are automatically nested. The span that is active when a new span is entered becomes its parent. This creates a causal tree that subscribers can use to reconstruct the full execution context.
+
+```rust
+use tracing::{info_span, debug};
+
+let outer = info_span!("outer");
+let _o = outer.enter();
+
+let inner = info_span!("inner", iteration = 1u32);
+let _i = inner.enter();
+
+debug!("this event is inside 'inner', which is inside 'outer'");
+```
+
+### Structured Fields on Spans
+
+Spans can carry typed key-value fields declared at creation time. Use the local-variable shorthand when the variable name matches the desired field name:
+
+```rust
+use tracing::{span, Level};
+
+let user_id: u64 = 42;
+let request_id = "abc-123";
+
+// Equivalent to: span!(Level::INFO, "handle", user_id = user_id, request_id = request_id)
+let span = span!(Level::INFO, "handle", user_id, request_id);
+let _enter = span.enter();
+```
+
+Spans may also declare fields with `field::Empty` and fill them in later:
+
+```rust
+use tracing::{trace_span, field};
+
+let span = trace_span!("query", sql = field::Empty, rows_returned = field::Empty);
+let _enter = span.enter();
+
+// ... execute query ...
+span.record("sql", "SELECT * FROM users");
+span.record("rows_returned", 17u64);
+```
+
+<Note>
+**`Span::enter()` in async code**: Never hold a `Span::enter()` guard across an `.await` point. Because async tasks may be suspended and resumed on different threads, the span will stay "entered" during unrelated work and produce incorrect, interleaved traces.
+
+Use the `#[instrument]` attribute on `async fn`s instead, or attach spans to futures with the `.instrument()` combinator:
+
+```rust
+use tracing::Instrument;
+
+async fn my_async_work() { /* ... */ }
+
+my_async_work()
+    .instrument(tracing::info_span!("my_async_work"))
+    .await;
+```
+</Note>
+
+---
+
+## Events
+
+An `Event` represents a _moment_ in time — something that happened during the execution of a program. Events are analogous to traditional log records, but they are emitted within the context of whatever span is currently active, which links them causally to the surrounding work.
+
+### Emitting Events
+
+The `event!` macro takes a level and zero or more fields, optionally followed by a format-string message:
+
+```rust
+use tracing::{event, Level};
+
+// A bare message
+event!(Level::INFO, "server started");
+
+// Structured fields only
+event!(Level::DEBUG, port = 8080u16, tls = true);
+
+// Fields and a formatted message
+let addr = "127.0.0.1";
+event!(Level::INFO, %addr, "listening on {}", addr);
+```
+
+### Shorthand Level Macros
+
+In practice, the level-specific shorthand macros are used far more often than `event!` directly:
+
+```rust
+use tracing::{trace, debug, info, warn, error};
+
+trace!(verbose_detail = true, "entered tight loop");
+debug!(item_count = 42u32, "processing batch");
+info!("application ready");
+warn!(retries = 3u32, "upstream responding slowly");
+error!(code = 500u16, "internal server error");
+```
+
+These macros are intentionally syntax-compatible with the `log` crate's macros, making migration straightforward.
+
+### Field Sigils: `?` and `%`
+
+By default, field values must implement the `Value` trait. Use the `?` sigil to record a value via `fmt::Debug`, or `%` to record via `fmt::Display`:
+
+```rust
+use tracing::info;
+
+#[derive(Debug)]
+struct Config { timeout_ms: u64 }
+
+let cfg = Config { timeout_ms: 500 };
+
+info!(config = ?cfg, "loaded configuration");        // uses Debug
+info!(path = %"/etc/app.toml", "reading from path"); // uses Display
+```
+
+---
+
+## Subscribers
+
+A `Subscriber` is the component that _collects_ trace data. While `tracing` defines the instrumentation API and the `Subscriber` trait, it deliberately ships no built-in implementations — that is the responsibility of crates like `tracing-subscriber`.
+
+### The `Subscriber` Trait
+
+The core methods a `Subscriber` must implement (defined in `tracing-core`) are:
+
+| Method | Called when… |
+|---|---|
+| `enabled(&self, metadata)` | A span or event is about to be created — return `false` to filter it out entirely |
+| `new_span(&self, attrs)` | A new span is constructed |
+| `enter(&self, id)` | Execution enters a span |
+| `exit(&self, id)` | Execution exits a span |
+| `event(&self, event)` | An event is emitted |
+| `record(&self, id, values)` | Fields are recorded on an existing span |
+
+```rust
+use tracing::{span::{Id, Attributes, Record}, Metadata, Event};
+
+// A minimal no-op subscriber — useful for testing or benchmarks.
+struct NoopSubscriber;
+
+impl tracing::Subscriber for NoopSubscriber {
+    fn enabled(&self, _: &Metadata<'_>) -> bool { true }
+    fn new_span(&self, _: &Attributes<'_>) -> Id { Id::from_u64(1) }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, _: &Event<'_>) {}
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+}
+```
+
+### Global vs. Scoped Subscribers
+
+**Global default** — set once for the entire process lifetime. This is what `tracing_subscriber::fmt::init()` does under the hood by calling `tracing::subscriber::set_global_default(subscriber)`.
+
+**Scoped default** — override the default for the current thread within a closure, using `tracing::subscriber::with_default()`:
+
+```rust
+use tracing::{info, Level};
+
+fn main() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::TRACE)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        info!("this will be collected");
+    });
+
+    info!("this will NOT be collected — no subscriber active");
+}
+```
+
+<Warning>
+Libraries must **never** call `set_global_default()` or `tracing_subscriber::fmt::init()`. Doing so will conflict with the application's own subscriber setup and will panic if called a second time.
+</Warning>
+
+---
+
+## Levels
+
+`Level` is an enum defined in `tracing-core` with five variants, ordered from most to least verbose:
+
+| Variant | Constant | Typical use |
+|---|---|---|
+| `Level::TRACE` | `tracing::Level::TRACE` | Extremely fine-grained — loop iterations, raw bytes |
+| `Level::DEBUG` | `tracing::Level::DEBUG` | Diagnostic detail useful during development |
+| `Level::INFO` | `tracing::Level::INFO` | Routine operational events (startup, requests) |
+| `Level::WARN` | `tracing::Level::WARN` | Unexpected but recoverable conditions |
+| `Level::ERROR` | `tracing::Level::ERROR` | Serious failures that require attention |
+
+### Compile-Time Filtering
+
+Tracing supports compile-time level filtering via Cargo feature flags. Levels below the selected threshold are compiled out entirely — they generate no code and impose zero runtime cost:
+
+```toml
+[dependencies]
+# Compile out TRACE and DEBUG in all builds:
+tracing = { version = "0.1", features = ["max_level_info"] }
+
+# Compile out TRACE and DEBUG only in release builds:
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+```
+
+Available features: `max_level_off`, `max_level_error`, `max_level_warn`, `max_level_info`, `max_level_debug`, `max_level_trace` (and `release_max_level_*` variants for release-only filtering).
+
+---
+
+## Fields
+
+Fields are typed key-value pairs attached to spans and events. They are the mechanism that makes `tracing` _structured_.
+
+### The `Value` Trait
+
+Any type that implements `tracing::field::Value` can be recorded as a field. The standard implementations cover all primitive types (`bool`, `i64`, `u64`, `f64`, `i128`, `u128`), `&str`, and `String`. Custom types can be recorded using the `?` (Debug) or `%` (Display) sigils without needing to implement `Value` directly.
+
+```rust
+use tracing::{info, debug};
+
+let user_id: u64 = 99;
+let username = "ferris";
+let ratio: f64 = 0.92;
+let active: bool = true;
+
+info!(user_id, username, ratio, active, "user stats");
+debug!(items = 7i64, "queue depth");
+```
+
+### Dot-Separated Field Names
+
+Field names can contain dots, enabling a pseudo-namespacing convention. Local struct fields can be recorded with the shorthand syntax:
+
+```rust
+use tracing::info_span;
+
+struct User { name: &'static str, email: &'static str }
+
+let user = User { name: "ferris", email: "ferris@rust-lang.org" };
+
+// Records fields named "user.name" and "user.email"
+let _span = info_span!("login", user.name, user.email).entered();
+```
+
+<Tip>
+Subscribers that output JSON (e.g. `tracing-subscriber` in JSON mode) will include all structured fields in the JSON object, making log ingestion by systems like Datadog, Elasticsearch, or Grafana Loki much easier than parsing free-form text.
+</Tip>
+
+---
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card
+    title="Spans"
+    icon="brackets-curly"
+    href="https://docs.rs/tracing/latest/tracing/span/index.html"
+  >
+    Full API documentation for the `span` module: `Span`, `Entered`, `Id`, and the `span!` family of macros.
+  </Card>
+  <Card
+    title="Events"
+    icon="bolt"
+    href="https://docs.rs/tracing/latest/tracing/struct.Event.html"
+  >
+    API documentation for the `Event` struct and the `event!` macro.
+  </Card>
+  <Card
+    title="The #[instrument] Macro"
+    icon="wand-magic-sparkles"
+    href="https://docs.rs/tracing/latest/tracing/attr.instrument.html"
+  >
+    Automatically wrap functions in spans, record arguments as fields, and handle async correctly.
+  </Card>
+  <Card
+    title="tracing-subscriber"
+    icon="layer-group"
+    href="https://docs.rs/tracing-subscriber"
+  >
+    Ready-to-use subscriber implementations, the `Layer` composability API, and environment-variable filtering.
+  </Card>
+</CardGroup>

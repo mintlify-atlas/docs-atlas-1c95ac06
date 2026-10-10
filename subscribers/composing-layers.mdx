@@ -1,0 +1,287 @@
+---
+title: "Composing Multiple Layers into a Subscriber"
+sidebarTitle: "Composing Layers"
+description: "Build flexible tracing pipelines by stacking multiple layers on a Registry, with per-layer filtering and dynamic layer configuration."
+---
+
+One of the most powerful features of `tracing-subscriber` is the ability to compose multiple independent layers into a single subscriber. Rather than writing one monolithic `Subscriber` that handles formatting, filtering, and every output destination, you build a pipeline from small, reusable pieces — each `Layer` focused on a single concern. A `fmt` layer handles text output, an `EnvFilter` layer handles filtering, a custom metrics layer handles counters, and so on. They all coexist on the same `Registry` base and each sees the exact subset of spans and events it needs.
+
+## The `Layer` Trait
+
+The `Layer` trait is defined in `tracing_subscriber::layer`. Unlike `Subscriber`, which is a _complete_ strategy for collecting trace data, a `Layer` is a _composable_ subset of that behaviour: it can observe events and spans, but it does not generate span IDs. That responsibility stays with the root subscriber (`Registry`).
+
+The key methods you can override are:
+
+| Method | Called when |
+|---|---|
+| `on_new_span` | A new span is created |
+| `on_record` | A span records additional field values |
+| `on_event` | An `event!` macro fires |
+| `on_enter` | A span is entered |
+| `on_exit` | A span is exited |
+| `on_close` | A span is dropped / closed |
+| `enabled` | Determines global enablement of a span or event |
+| `register_callsite` | First time a callsite is encountered (cached) |
+
+All methods have default no-op implementations, so you only need to implement what you care about.
+
+## `SubscriberExt::with`
+
+Layers are stacked using the `SubscriberExt::with` method, which is provided by importing `tracing_subscriber::prelude::*`. Each call to `.with()` wraps the current subscriber in a new `Layered` struct that implements `Subscriber`:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(layer_one)
+    .with(layer_two)
+    .with(layer_three)
+    .init();
+```
+
+Layers are evaluated in the order they are added (innermost first when processing events), but for filtering purposes the outermost layer in the chain has the final say on whether a given callsite is enabled.
+
+## Building a Registry with Multiple Layers
+
+The `Registry` is the standard base subscriber. It stores per-span data and makes it available to every layer via `LookupSpan`. Here is a complete example combining an `EnvFilter` layer with a formatting layer:
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+tracing_subscriber::registry()
+    .with(
+        EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new("info"))
+            .unwrap()
+    )
+    .with(fmt::layer().with_target(true))
+    .init();
+```
+
+The `EnvFilter` acts as a global gate: any span or event it disables will not reach the `fmt` layer at all.
+
+## Per-Layer Filtering with `.with_filter()`
+
+Sometimes different layers should observe different subsets of trace data. For example, a `fmt` layer might show all DEBUG output on stdout, while a JSON file layer only captures WARN and above. _Per-layer filtering_ attaches a `Filter` to an individual layer using `.with_filter()`:
+
+```rust
+use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
+use std::io;
+
+// Stdout layer: DEBUG and above
+let stdout_layer = fmt::layer()
+    .with_writer(io::stdout)
+    .with_filter(LevelFilter::DEBUG);
+
+// Stderr layer: WARN and above only
+let stderr_layer = fmt::layer()
+    .with_writer(io::stderr)
+    .with_filter(LevelFilter::WARN);
+
+tracing_subscriber::registry()
+    .with(stdout_layer)
+    .with(stderr_layer)
+    .init();
+```
+
+A span or event is recorded by a layer if and only if **that layer's filter** enables it. Other layers are not affected — an event disabled by one layer's filter can still be observed by another:
+
+```rust
+use tracing_subscriber::{filter::{filter_fn, LevelFilter}, prelude::*};
+
+// An access-log layer that only sees events with the "http_access" target
+let access_log = tracing_subscriber::fmt::layer()
+    .with_filter(filter_fn(|metadata| {
+        metadata.target() == "http_access"
+    }));
+
+// A general-purpose logging layer that sees INFO and above
+let fmt_layer = tracing_subscriber::fmt::layer()
+    .with_filter(LevelFilter::INFO);
+
+tracing_subscriber::registry()
+    .with(access_log)
+    .with(fmt_layer)
+    .init();
+
+// This event is only seen by `fmt_layer`
+tracing::warn!(dose_roentgen = %3.8, "not great, but not terrible");
+
+// This event is only seen by `access_log`
+tracing::trace!(target: "http_access", "HTTP request started");
+
+// Both layers observe this event
+tracing::error!(target: "http_access", "HTTP request failed");
+```
+
+<Note>
+Per-layer filtering requires the `registry` feature flag (enabled by default). Only `Registry` and subscribers built on it support per-layer filters.
+</Note>
+
+## The Per-Layer Filter Example
+
+The `per-layer-filter` example from the `tracing` repository demonstrates a common real-world pattern — pretty-printed DEBUG output to stdout alongside JSON-formatted WARN output to a log file:
+
+```rust
+use std::io;
+use tracing_subscriber::{
+    filter::{LevelFilter, Targets},
+    fmt,
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+    Layer,
+};
+
+// A pretty-printed stdout layer that captures DEBUG and above.
+let stdout_layer = fmt::layer()
+    .with_writer(io::stdout)
+    .pretty()
+    .with_filter(LevelFilter::DEBUG);
+
+// A JSON file layer that captures WARN and above for specific targets.
+let file_layer = fmt::layer()
+    .json()
+    .with_writer(non_blocking)
+    .with_filter(
+        Targets::new()
+            .with_target("my_app", LevelFilter::WARN)
+            .with_target("my_lib", LevelFilter::WARN),
+    );
+
+tracing_subscriber::registry()
+    .with(stdout_layer)
+    .with(file_layer)
+    .init();
+```
+
+## Combining Layers with `and_then`
+
+Two layers can be joined into a single `Layered` layer using `Layer::and_then`, and then a shared filter can be applied to both at once:
+
+```rust
+use tracing_subscriber::{filter::LevelFilter, prelude::*};
+
+let layer_a = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+let layer_b = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+
+// Apply INFO filter to both layer_a and layer_b together
+let info_layers = layer_a
+    .and_then(layer_b)
+    .with_filter(LevelFilter::INFO);
+
+tracing_subscriber::registry()
+    .with(info_layers)
+    .init();
+```
+
+## Conditional Layers with `Option<Layer>`
+
+`Option<L>` implements `Layer<S>` — `None` acts as a no-op layer that passes everything through. This lets you enable or disable an individual layer at runtime without changing the overall type of the subscriber:
+
+```rust
+use tracing_subscriber::{Registry, prelude::*};
+use std::fs::File;
+
+let is_production = std::env::var("ENV").as_deref() == Ok("production");
+
+// In production, also log JSON to a file; otherwise, do nothing.
+let json_layer = if is_production {
+    let file = File::create("app.log").expect("failed to create log file");
+    Some(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(file)
+    )
+} else {
+    None
+};
+
+Registry::default()
+    .with(tracing_subscriber::fmt::layer())
+    .with(json_layer) // None is a valid Layer — just a no-op
+    .init();
+```
+
+## Type-Erased Layers with `Box<dyn Layer>`
+
+When layers have different concrete types (for example, from different match arms), use `.boxed()` or `Box::new(layer)` to erase the type:
+
+```rust
+use tracing_subscriber::{Layer, filter::LevelFilter, prelude::*};
+use std::{path::PathBuf, fs::File, io};
+
+pub enum LogConfig { File(PathBuf), Stdout, Stderr }
+
+impl LogConfig {
+    pub fn layer<S>(self) -> Box<dyn Layer<S> + Send + Sync + 'static>
+    where
+        S: tracing_core::Subscriber,
+        for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        let fmt = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_thread_names(true);
+
+        match self {
+            LogConfig::File(path) => {
+                let file = File::create(path).expect("failed to create log file");
+                Box::new(fmt.with_writer(file))
+            },
+            LogConfig::Stdout => Box::new(fmt.with_writer(io::stdout)),
+            LogConfig::Stderr => Box::new(fmt.with_writer(io::stderr)),
+        }
+    }
+}
+
+tracing_subscriber::registry()
+    .with(LogConfig::Stdout.layer())
+    .init();
+```
+
+## Variable-Length Layer Lists with `Vec<L>`
+
+`Vec<L>` also implements `Layer<S>` when `L: Layer<S>`. This is useful when the number of layers is determined at runtime:
+
+```rust
+use tracing_subscriber::{Layer, prelude::*};
+
+let mut layers: Vec<Box<dyn Layer<_> + Send + Sync>> = Vec::new();
+
+if std::env::var("LOG_FILE").is_ok() {
+    let file = std::fs::File::create("app.log").unwrap();
+    layers.push(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(file)
+            .boxed()
+    );
+}
+
+if std::env::var("LOG_STDOUT").is_ok() {
+    layers.push(
+        tracing_subscriber::fmt::layer()
+            .pretty()
+            .with_filter(tracing_subscriber::filter::LevelFilter::INFO)
+            .boxed()
+    );
+}
+
+tracing_subscriber::registry()
+    .with(layers)
+    .init();
+```
+
+## Using `tracing_subscriber::prelude::*`
+
+Import the prelude to get `SubscriberExt::with` and other extension traits in scope without importing them individually:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(tracing_subscriber::EnvFilter::from_default_env())
+    .init();
+```
+
+The prelude re-exports `SubscriberExt`, `SubscriberInitExt`, `Layer`, and several `MakeWriter` extension traits.

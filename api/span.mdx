@@ -1,0 +1,317 @@
+---
+title: "Span API Reference: Execution Context in Tracing"
+sidebarTitle: "Span"
+description: "Full API reference for the Span struct — entering, recording fields, causal relationships, async instrumentation, and the Instrument trait for futures."
+---
+
+A span represents a period of time during which a program was executing in a particular context. Every span has a name, a verbosity level, a set of typed key-value fields, and a unique [`Id`](#id) assigned by the active subscriber. Spans form a tree: when a new span is created while another span is executing, the new span becomes a child of the current one. The [`Span`](#the-span-struct) struct is a cloneable, `Send + Sync` handle to a span — holding a `Span` does not mean you are inside it. You must explicitly _enter_ the span to make it the active context on the current thread.
+
+---
+
+## The `Span` Struct
+
+```rust
+pub struct Span { /* private fields */ }
+```
+
+`Span` is `Clone`, `Send`, and `Sync`. Cloning a span increments a reference count inside the subscriber (via `Subscriber::clone_span`). When the last handle is dropped the subscriber is notified via `Subscriber::try_close`, at which point it can treat the span as permanently closed.
+
+If the current subscriber has filtered out a span, the `Span` is silently disabled — all operations on it become no-ops, so you do not need to guard every call site.
+
+---
+
+## Constructors
+
+### `Span::current`
+
+```rust
+pub fn current() -> Span
+```
+
+Returns a handle to the span that the active subscriber considers to be currently executing on this thread. If no span is currently active, or the subscriber does not track the current span, the returned handle is disabled.
+
+```rust
+use tracing::Span;
+
+let current = Span::current();
+if !current.is_disabled() {
+    current.record("extra_field", "late_value");
+}
+```
+
+---
+
+### `Span::none`
+
+```rust
+pub const fn none() -> Span
+```
+
+Constructs a completely disabled, no-op span that does not correspond to any callsite. Useful as a sentinel value instead of `Option<Span>`.
+
+```rust
+use tracing::Span;
+
+struct Task {
+    span: Span,
+}
+
+let task = Task { span: Span::none() };
+assert!(task.span.is_none());
+```
+
+---
+
+## Entering a Span
+
+### `span.enter`
+
+```rust
+pub fn enter(&self) -> Entered<'_>
+```
+
+Enters the span, returning an RAII guard. While the guard is alive the span is the active context on the current thread. Dropping the guard exits the span by calling `Subscriber::exit`.
+
+```rust
+use tracing::{info_span, info};
+
+let span = info_span!("processing", item = 7);
+let _guard = span.enter();
+
+// All events emitted here are recorded inside "processing".
+info!("item validated");
+
+// Guard dropped here → span exited.
+```
+
+<Warning>
+**Do not hold an `Entered` guard across an `.await` point.** When an async task yields, the runtime may poll a different task while the guard is still alive, causing that task's events to appear inside the wrong span. Use `span.in_scope(|| ...)` for synchronous sections, or `.instrument(span)` for entire futures.
+</Warning>
+
+---
+
+### `span.entered`
+
+```rust
+pub fn entered(self) -> EnteredSpan
+```
+
+Moves the span into a guard (`EnteredSpan`) and enters it in one step. The span is re-accessible via `EnteredSpan::exit()` which returns the original `Span`.
+
+```rust
+use tracing::info_span;
+
+let _span = info_span!("setup").entered();
+// work happens here
+```
+
+`EnteredSpan` is `!Send` to prevent the guard from being sent to another thread while entered.
+
+---
+
+### `span.in_scope`
+
+```rust
+pub fn in_scope<F: FnOnce() -> T, T>(&self, f: F) -> T
+```
+
+Enters the span, executes the closure `f`, then exits the span. The span is guaranteed to be exited before the call returns, making this safe to use inside async code for synchronous sections.
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("serialize");
+let json = span.in_scope(|| serde_json::to_string(&payload).unwrap());
+```
+
+---
+
+## Recording Fields
+
+### `span.record`
+
+```rust
+pub fn record<Q, V>(&self, field: &Q, value: V) -> &Self
+where
+    Q: field::AsField + ?Sized,
+    V: field::Value,
+```
+
+Records a single additional field value on this span. The field must have been declared (possibly with `field::Empty`) when the span was created; recording a field that was not declared has no effect.
+
+```rust
+use tracing::{info_span, field};
+
+let span = info_span!("request", request_id = field::Empty, status = field::Empty);
+let _guard = span.enter();
+
+// ... process request ...
+
+span.record("request_id", &req.id);
+span.record("status", 200i64);
+```
+
+<Tip>
+To record several fields in a single call, use the [`record_all!`](/api/macros) macro, which accepts the same `key = value, ...` syntax as span creation macros.
+</Tip>
+
+---
+
+## Causal Relationships
+
+### `span.follows_from`
+
+```rust
+pub fn follows_from(&self, from: impl Into<Option<Id>>) -> &Self
+```
+
+Declares that this span has an indirect causal relationship with another span identified by `from`. Unlike the parent-child relationship, a follows-from relationship does not imply that the follower is part of the precedent's duration. A span may have any number of predecessors.
+
+```rust
+use tracing::{info_span, Span};
+
+let listener_span = info_span!("listener");
+// Spawn a handler task
+let handler_span = info_span!("handler");
+handler_span.follows_from(&listener_span);
+```
+
+Accepts any type that converts to `Option<Id>`: a `Span`, `&Span`, an `Id`, or `None`.
+
+---
+
+## Inspecting a Span
+
+### `span.id`
+
+```rust
+pub fn id(&self) -> Option<Id>
+```
+
+Returns the span's unique [`Id`](#id) if the span is enabled, or `None` if it is disabled.
+
+---
+
+### `span.is_disabled`
+
+```rust
+pub fn is_disabled(&self) -> bool
+```
+
+Returns `true` if the subscriber filtered out this span or if the span has been closed. A disabled span accepts all operations as no-ops.
+
+---
+
+### `span.is_none`
+
+```rust
+pub fn is_none(&self) -> bool
+```
+
+Returns `true` only if this span was constructed with `Span::none()` — i.e., it has no metadata at all. `is_none()` implies `is_disabled()`, but not vice versa: a span filtered out by the subscriber is disabled but not none.
+
+---
+
+### `span.metadata`
+
+```rust
+pub fn metadata(&self) -> Option<&'static Metadata<'static>>
+```
+
+Returns the static [`Metadata`](/api/event#metadata) describing this span's name, target, level, and fields. Returns `None` only for spans created with `Span::none()`.
+
+---
+
+## The `Entered<'_>` Guard
+
+```rust
+pub struct Entered<'a> { /* private fields */ }
+```
+
+Returned by `Span::enter`. Borrows the parent `Span` for its lifetime. When dropped, calls `Subscriber::exit` on the span's `Id`. Marked `#[must_use]` — the compiler will warn if you bind it to `_` accidentally.
+
+---
+
+## The `EnteredSpan` Guard
+
+```rust
+pub struct EnteredSpan { /* private fields */ }
+```
+
+An owned version of `Entered` returned by `Span::entered`. Holds the `Span` by value. Implements `Deref<Target = Span>` so you can call span methods directly on the guard. `!Send` by design.
+
+```rust
+use tracing::info_span;
+
+let span = info_span!("work").entered();
+span.record("step", 1i64); // Deref to Span
+let span = span.exit();    // Explicit exit, returns Span
+```
+
+---
+
+## The `Id` Type
+
+```rust
+pub struct Id { /* private fields */ }
+```
+
+Re-exported from `tracing-core`. A `u64`-backed identifier assigned by the subscriber. IDs are only unique _within_ a subscriber's lifetime; the subscriber controls the assignment strategy. Used in `Subscriber` method signatures as keys into span data.
+
+```rust
+use tracing::{span, Level, Id};
+
+let span = span!(Level::INFO, "my_span");
+if let Some(id) = span.id() {
+    println!("span id = {:?}", id);
+}
+```
+
+---
+
+## The `Instrument` Trait
+
+`tracing` provides the `Instrument` extension trait for futures, enabling clean async span propagation without holding a guard across await points.
+
+Import: `use tracing::Instrument;`
+
+### `future.instrument`
+
+```rust
+fn instrument(self, span: Span) -> Instrumented<Self>
+```
+
+Attaches `span` to the future. The span is entered every time the future is polled and exited whenever the future yields, correctly pairing enters and exits across await points regardless of which thread resumes the future.
+
+```rust
+use tracing::{info_span, Instrument};
+
+let span = info_span!("process_item", id = item.id);
+tokio::spawn(async move {
+    do_work().await;
+}.instrument(span));
+```
+
+---
+
+### `future.in_current_span`
+
+```rust
+fn in_current_span(self) -> Instrumented<Self>
+```
+
+Shorthand for `.instrument(Span::current())`. Captures the current span at the call site and attaches it to the future.
+
+```rust
+use tracing::Instrument;
+
+async fn handler() {
+    subtask()
+        .in_current_span()
+        .await;
+}
+```
+
+<Note>
+`in_current_span` captures the span at the point where it is called — if no span is currently active, the future runs in a disabled span (a no-op). Call it inside an already-entered span to ensure the correct context is captured.
+</Note>

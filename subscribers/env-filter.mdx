@@ -1,0 +1,269 @@
+---
+title: "Filtering Events at Runtime with EnvFilter"
+sidebarTitle: "EnvFilter"
+description: "Use tracing-subscriber's EnvFilter to control which spans and events are recorded at runtime using RUST_LOG directive syntax."
+---
+
+`EnvFilter` gives you runtime control over which spans and events your application records, without recompiling. It parses a string of _directives_ — drawn from the `RUST_LOG` environment variable by default, or supplied programmatically — and evaluates each span and event against those directives before deciding whether to pass it downstream. This lets you dial logging verbosity up and down in production, enable detailed tracing for a single crate while silencing others, or even filter based on a span's field values.
+
+## What `EnvFilter` Does
+
+`EnvFilter` implements both the `Layer` trait and the `Filter` trait from `tracing-subscriber`, so it can be used for:
+
+- **Global filtering** — applied as a `Layer` to the entire subscriber stack, disabling spans and events before any other layer sees them.
+- **Per-layer filtering** — attached to a specific layer with `.with_filter()`, so that layer observes only the subset of data selected by the filter while other layers remain unaffected.
+
+Under the hood `EnvFilter` builds a set of _static_ directives (those that can be evaluated from metadata alone) and _dynamic_ directives (those that depend on the current span context or field values). It uses the static set to cache interest at the callsite level and the dynamic set to re-evaluate interest at each execution point.
+
+## The `RUST_LOG` Environment Variable
+
+The simplest way to configure `EnvFilter` is via the `RUST_LOG` environment variable. `EnvFilter::from_default_env()` reads this variable and parses it into a set of directives:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+let filter = EnvFilter::from_default_env();
+```
+
+You can then use this filter with the `fmt` subscriber:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Or, even more concisely, `tracing_subscriber::fmt::init()` does exactly this automatically when the `env-filter` feature is enabled.
+
+Common `RUST_LOG` values:
+
+```bash
+# Enable everything at DEBUG level
+RUST_LOG=debug cargo run
+
+# Enable only your crate at TRACE level
+RUST_LOG=my_crate=trace cargo run
+
+# Multiple directives
+RUST_LOG=warn,my_crate=debug,tokio=info cargo run
+```
+
+## Directive Syntax
+
+Directives follow the pattern `target[span{field=value}]=level`. Every component except at least one of `target`, `span`, or `level` is optional.
+
+### Level Only
+
+Enables all spans and events at or below the specified verbosity level:
+
+```
+debug
+trace
+info
+warn
+error
+```
+
+### Target Only
+
+Enables everything from a specific crate or module path (equivalent to `=trace`):
+
+```
+my_crate
+tokio::net
+h2
+```
+
+### Target and Level
+
+The most common pattern — enables all spans and events from a target up to a given level:
+
+```
+my_crate=debug
+tokio::net=info
+my_crate::module::submodule=trace
+```
+
+### Span Name Filter
+
+Enables spans and events that occur within a named span, optionally scoped to a target:
+
+```
+my_crate[span_name]=trace
+[my_span]=debug
+```
+
+### Span Field Value Filter
+
+Enables spans that have a specific field name, or a field matching a particular value:
+
+```
+[span_name{field_name}]=debug
+[span_name{field_name="value"}]=trace
+[{request_id}]=trace
+```
+
+<Note>
+By default, string field values in directives are matched as [regular expressions](https://docs.rs/regex/latest/regex/#syntax). To use exact matching instead, construct your filter through the `EnvFilter::builder()` API and call `.with_regex(false)`.
+</Note>
+
+### Multiple Directives
+
+Separate multiple directives with commas. More specific directives take precedence over less specific ones:
+
+```
+warn,my_crate=debug,my_crate::noisy_module=error
+```
+
+This enables `WARN` globally, `DEBUG` for `my_crate`, and only `ERROR` for `my_crate::noisy_module`.
+
+### Complete Syntax Reference
+
+```
+target[span_name{field=value}]=level
+```
+
+Full examples:
+
+| Directive | Meaning |
+|---|---|
+| `debug` | Enable DEBUG and above for everything |
+| `my_crate` | Enable all levels for `my_crate` |
+| `tokio::net=info` | Enable INFO and above for `tokio::net` |
+| `my_crate[span_a]=trace` | Enable TRACE inside spans named `span_a` in `my_crate` |
+| `[span_b{name="bob"}]` | Enable any level inside `span_b` when its `name` field equals `"bob"` |
+| `warn,tokio::net=info` | WARN globally, INFO for `tokio::net` |
+
+## Programmatic Construction
+
+### `EnvFilter::new`
+
+Parses a directive string, ignoring any invalid directives:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+let filter = EnvFilter::new("my_crate=debug,tokio=trace");
+```
+
+### `EnvFilter::try_new`
+
+Like `new`, but returns an error if any directive is invalid:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+let filter = EnvFilter::try_new("my_crate=debug,invalid!!!")?;
+```
+
+### `EnvFilter::from_default_env`
+
+Reads from the `RUST_LOG` environment variable. If the variable is absent or contains only invalid directives, falls back to `ERROR`:
+
+```rust
+let filter = EnvFilter::from_default_env();
+```
+
+### `EnvFilter::try_from_default_env`
+
+Returns an error if `RUST_LOG` is unset or contains invalid directives:
+
+```rust
+let filter = EnvFilter::try_from_default_env()
+    .unwrap_or_else(|_| EnvFilter::new("info"));
+```
+
+### `EnvFilter::from_env`
+
+Reads from a custom environment variable name:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+// Reads from `MY_APP_LOG` instead of `RUST_LOG`
+let filter = EnvFilter::from_env("MY_APP_LOG");
+```
+
+### Adding Directives Programmatically
+
+Use `.add_directive()` to augment a parsed filter with additional rules:
+
+```rust
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+
+let filter = EnvFilter::try_from_default_env()?
+    // Set a base level of WARN for everything not matched above
+    .add_directive(LevelFilter::WARN.into())
+    // Override to DEBUG for a specific module
+    .add_directive("my_crate::my_mod=debug".parse()?);
+```
+
+## Using `EnvFilter` with the `fmt` Subscriber
+
+### Via `with_env_filter`
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter};
+
+fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+### Via a layered registry
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+let fmt_layer = fmt::layer().with_target(false);
+
+let filter_layer = EnvFilter::try_from_default_env()
+    .or_else(|_| EnvFilter::try_new("info"))
+    .unwrap();
+
+tracing_subscriber::registry()
+    .with(filter_layer)
+    .with(fmt_layer)
+    .init();
+```
+
+## Using `EnvFilter` as a Per-Layer Filter
+
+`EnvFilter` also implements the `Filter` trait, so it can be attached to a single layer with `.with_filter()`. Other layers in the stack remain unaffected:
+
+```rust
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+// Parse a filter from RUST_LOG
+let filter = EnvFilter::from_default_env();
+
+// Apply the filter only to this fmt layer
+let filtered_layer = fmt::layer().with_filter(filter);
+
+// Another layer that sees everything regardless of RUST_LOG
+let unfiltered_layer = fmt::layer()
+    .with_writer(std::io::stderr)
+    .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+
+tracing_subscriber::registry()
+    .with(filtered_layer)
+    .with(unfiltered_layer)
+    .init();
+```
+
+<Tip>
+Per-layer filtering requires the `registry` feature flag (enabled by default). `EnvFilter` as a per-layer `Filter` is most useful when you want different verbosity levels for different output destinations — for example, verbose to a debug log file but only warnings to a metrics sink.
+</Tip>
+
+## Feature Flag
+
+`EnvFilter` is gated behind the `env-filter` feature flag in `tracing-subscriber`:
+
+```toml
+[dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+This feature is **not** enabled by default, so you must opt in explicitly unless you are using a meta-feature that pulls it in (such as the `full` feature provided by some re-export crates).

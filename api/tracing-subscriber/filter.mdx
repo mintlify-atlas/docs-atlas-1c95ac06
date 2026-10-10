@@ -1,0 +1,373 @@
+---
+title: "Filter API Reference for tracing-subscriber"
+sidebarTitle: "Filter"
+description: "Comprehensive reference for tracing-subscriber's filtering APIs including EnvFilter, LevelFilter, Targets, FilterFn, and the per-layer Filter trait."
+---
+
+Filtering in `tracing-subscriber` determines which spans and events are collected and by whom. The library supports two complementary strategies: *global filtering*, where a `Layer` implementation votes on whether a span or event is enabled for the entire subscriber stack, and *per-layer filtering*, where individual layers are paired with a `Filter` that controls what that layer sees independently of all others. This page documents all of the filter types and traits provided by `tracing-subscriber`, from the low-level `Filter` trait to the powerful directive-based `EnvFilter`.
+
+## The `Filter<S>` Trait
+
+The `Filter<S>` trait is used for per-layer filtering. A filter attached to a layer via `Layer::with_filter` controls what that layer observes, without affecting other layers in the stack.
+
+```rust
+// Requires features: "registry", "std"
+pub trait Filter<S> {
+    fn enabled(&self, meta: &Metadata<'_>, cx: &Context<'_, S>) -> bool;
+
+    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
+        // Default: Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        // Default: None
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, cx: &Context<'_, S>) -> bool {
+        // Default: true
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>);
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>);
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>);
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>);
+}
+```
+
+### Method Reference
+
+| Method | Description |
+|--------|-------------|
+| `enabled(meta, cx)` | Returns `true` if this filter enables the span or event described by `meta`. A `false` result disables the event **for the attached layer only**; other layers are unaffected. |
+| `callsite_enabled(meta)` | Returns an `Interest` indicating whether this filter will always, sometimes, or never be interested in a given callsite. Returning `always` or `never` allows the result to be cached. Defaults to `Interest::sometimes()`. |
+| `max_level_hint()` | Returns an optional hint for the highest verbosity level this filter will enable. Used to optimize callsite interest computation. |
+| `event_enabled(event, cx)` | Called before the filtered layer's `on_event` to allow field-based event filtering. Defaults to `true`. |
+
+<Note>
+The `Filter` trait and per-layer filtering are only available when the `registry` and `std` feature flags are enabled. The `Registry` type is currently the only root subscriber that fully supports per-layer filters.
+</Note>
+
+---
+
+## `EnvFilter` — Directive-Based Filter
+
+`EnvFilter` is a powerful `Layer` and `Filter` implementation that enables or disables spans and events based on a set of filtering *directives*. It is modeled on `env_logger`'s syntax and supports filtering by target, span name, field values, and verbosity level.
+
+```rust
+#[cfg(all(feature = "env-filter", feature = "std"))]
+pub struct EnvFilter { /* ... */ }
+```
+
+### Directive Syntax
+
+The filter string consists of comma-separated directives:
+
+```
+target[span{field=value}]=level
+```
+
+Any component may be omitted:
+
+| Directive example | Meaning |
+|-------------------|---------|
+| `info` | Enable `INFO` and above for all targets. |
+| `my_crate=debug` | Enable `DEBUG` and above for `my_crate`. |
+| `tokio::net=trace` | Enable `TRACE` and above for `tokio::net`. |
+| `my_crate[span_a]=trace` | Enable `TRACE` within spans named `span_a` in `my_crate`. |
+| `[span_b{name="bob"}]` | Enable any span or event inside a `span_b` span with `name="bob"`. |
+| `warn,tokio::net=info` | `WARN` globally, plus `INFO` for `tokio::net`. |
+
+- A directive without a level enables everything it matches (equivalent to `=trace`).
+- If only a level is given (`info`), it sets the global maximum level for unmatched callsites.
+- Field value patterns are treated as regular expressions by default (disable with `EnvFilter::builder().with_regex(false)`).
+
+### Construction
+
+<Tabs>
+  <Tab title="From environment">
+
+```rust
+// Reads RUST_LOG; ignores invalid directives
+pub fn from_default_env() -> Self;
+
+// Reads RUST_LOG; returns Err on invalid directives
+pub fn try_from_default_env() -> Result<Self, FromEnvError>;
+
+// Reads a named env var; ignores invalid directives
+pub fn from_env<A: AsRef<str>>(env: A) -> Self;
+
+// Reads a named env var; returns Err on invalid directives
+pub fn try_from_env<A: AsRef<str>>(env: A) -> Result<Self, FromEnvError>;
+```
+
+  </Tab>
+  <Tab title="From string">
+
+```rust
+// Parses directives from a string; ignores invalid ones
+pub fn new<S: AsRef<str>>(directives: S) -> Self;
+
+// Parses directives from a string; returns Err on first invalid directive
+pub fn try_new<S: AsRef<str>>(dirs: S) -> Result<Self, directive::ParseError>;
+```
+
+  </Tab>
+  <Tab title="Builder">
+
+```rust
+// Returns a Builder for additional configuration before parsing
+pub fn builder() -> Builder;
+
+// Example: disable regex matching for untrusted input
+let filter = EnvFilter::builder()
+    .with_regex(false)
+    .with_default_directive(LevelFilter::INFO.into())
+    .parse("my_crate=debug")?;
+```
+
+  </Tab>
+</Tabs>
+
+### Adding Directives
+
+```rust
+pub fn add_directive(mut self, mut directive: Directive) -> Self;
+```
+
+Directives can be parsed from strings or constructed from a `LevelFilter`:
+
+```rust
+use tracing_subscriber::{EnvFilter, filter::{LevelFilter, Directive}};
+
+let filter = EnvFilter::try_from_default_env()
+    .unwrap_or_else(|_| EnvFilter::new("info"))
+    // Set global fallback to WARN
+    .add_directive(LevelFilter::WARN.into())
+    // Override for a specific module
+    .add_directive("my_crate::http=debug".parse().unwrap());
+```
+
+### Usage as a Global Layer
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+tracing_subscriber::registry()
+    .with(fmt::layer())
+    .with(EnvFilter::from_default_env())
+    .init();
+```
+
+### Usage as a Per-Layer Filter
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+let filter = EnvFilter::from_default_env();
+
+// Only this layer is affected by the filter
+tracing_subscriber::registry()
+    .with(fmt::layer().with_filter(filter))
+    .with(fmt::layer())  // sees everything
+    .init();
+```
+
+---
+
+## `LevelFilter` — Simple Level-Based Filter
+
+`LevelFilter` is a re-export of `tracing_core::metadata::LevelFilter`. It implements both `Layer<S>` (for global filtering) and `Filter<S>` (for per-layer filtering), making it the simplest built-in filter.
+
+```rust
+pub use tracing_core::metadata::LevelFilter;
+```
+
+### Constants
+
+| Constant | Description |
+|----------|-------------|
+| `LevelFilter::TRACE` | Enable `TRACE` and above (most verbose). |
+| `LevelFilter::DEBUG` | Enable `DEBUG` and above. |
+| `LevelFilter::INFO` | Enable `INFO` and above. |
+| `LevelFilter::WARN` | Enable `WARN` and above. |
+| `LevelFilter::ERROR` | Enable `ERROR` only. |
+| `LevelFilter::OFF` | Disable all spans and events. |
+
+### Example
+
+```rust
+use tracing_subscriber::{fmt, filter::LevelFilter, prelude::*};
+
+// Global filtering:
+tracing_subscriber::fmt()
+    .with_max_level(LevelFilter::DEBUG)
+    .init();
+
+// Per-layer filtering:
+tracing_subscriber::registry()
+    .with(fmt::layer().pretty().with_filter(LevelFilter::INFO))
+    .with(fmt::layer().json().with_filter(LevelFilter::WARN))
+    .init();
+```
+
+---
+
+## `Targets` — Target-Prefix Filter
+
+`Targets` filters spans and events based on their *target* (typically the Rust module path), paired with a `LevelFilter` for each target prefix. It is a lighter-weight alternative to `EnvFilter` when dynamic span-context filtering is not needed.
+
+```rust
+// Requires features: "std" or "alloc"
+pub struct Targets { /* ... */ }
+```
+
+### Construction Methods
+
+```rust
+// Create an empty Targets filter
+pub fn new() -> Self;
+
+// Add a target+level pair
+pub fn with_target(
+    mut self,
+    target: impl Into<String>,
+    level: impl Into<LevelFilter>,
+) -> Self;
+
+// Add multiple target+level pairs at once
+pub fn with_targets<T, L>(
+    mut self,
+    targets: impl IntoIterator<Item = (T, L)>,
+) -> Self;
+
+// Set the default level for targets not matched by any prefix
+pub fn with_default(mut self, level: impl Into<LevelFilter>) -> Self;
+```
+
+### Example
+
+```rust
+use tracing_subscriber::{filter::{LevelFilter, Targets}, fmt, prelude::*};
+
+let filter = Targets::new()
+    .with_target("my_app", LevelFilter::DEBUG)
+    .with_target("my_app::database", LevelFilter::INFO)
+    .with_default(LevelFilter::WARN);
+
+tracing_subscriber::registry()
+    .with(fmt::layer().with_filter(filter))
+    .init();
+```
+
+`Targets` can also be parsed from a string in the same `target=level` syntax:
+
+```rust
+use std::str::FromStr;
+use tracing_subscriber::filter::Targets;
+
+let filter: Targets = "my_app=debug,tokio=warn".parse().unwrap();
+```
+
+---
+
+## `FilterFn` — Closure-Based Filter
+
+`FilterFn` wraps a closure or function pointer to implement both `Layer<S>` and `Filter<S>`. Use the `filter_fn` free function to construct one:
+
+```rust
+pub fn filter_fn<F>(f: F) -> FilterFn<F>
+where
+    F: Fn(&Metadata<'_>) -> bool;
+```
+
+```rust
+use tracing_subscriber::{filter::filter_fn, prelude::*};
+
+let filter = filter_fn(|metadata| {
+    metadata.target().starts_with("my_crate")
+        && *metadata.level() <= tracing::Level::INFO
+});
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer().with_filter(filter))
+    .init();
+```
+
+For filters that need access to the current span context, use `DynFilterFn`:
+
+```rust
+pub fn dynamic_filter_fn<S, F>(f: F) -> DynFilterFn<S, F>
+where
+    F: Fn(&Metadata<'_>, &Context<'_, S>) -> bool;
+```
+
+---
+
+## Per-Layer Filtering via `.with_filter()`
+
+Any filter that implements `Filter<S>` can be attached to a `Layer` using `Layer::with_filter`:
+
+```rust
+fn with_filter<F>(self, filter: F) -> filter::Filtered<Self, F, S>
+where
+    Self: Sized,
+    F: Filter<S>;
+```
+
+The returned `Filtered<L, F, S>` implements `Layer<S>`. A span or event will be processed by the layer only if the filter's `enabled` (and, for events, `event_enabled`) return `true`.
+
+When multiple per-layer filters are in use, a span is recorded if *any* layer enables it — but each layer only sees spans and events its own filter permits:
+
+```rust
+use tracing_subscriber::{filter::{filter_fn, LevelFilter}, fmt, prelude::*};
+
+tracing_subscriber::registry()
+    // Access log layer: only "http_access" target events
+    .with(
+        fmt::layer().with_filter(filter_fn(|meta| {
+            meta.target() == "http_access"
+        }))
+    )
+    // General log layer: INFO and above
+    .with(fmt::layer().with_filter(LevelFilter::INFO))
+    .init();
+
+// Seen only by access log layer:
+tracing::trace!(target: "http_access", "HTTP request started");
+
+// Seen by both layers:
+tracing::error!(target: "http_access", "HTTP request failed!");
+
+// Seen only by the general log layer:
+tracing::warn!("something looks off");
+
+// Seen by neither:
+tracing::debug!("verbose debug message");
+```
+
+<Tip>
+Combine per-layer filters with `Layer::and_then` to apply a single shared filter to a group of layers. Call `.with_filter()` on the resulting `Layered` layer to gate both with one filter.
+</Tip>
+
+---
+
+## Optional Filter (`Option<F>`)
+
+`Option<F>` implements `Filter<S>` when `F: Filter<S>`. A `None` filter passes everything through; `Some(filter)` delegates to the inner filter. This is useful for conditionally enabling filters at runtime without changing the subscriber's type:
+
+```rust
+use tracing_subscriber::{filter::filter_fn, Layer};
+
+fn setup_tracing(enable_http_filter: bool) {
+    let http_filter = if enable_http_filter {
+        Some(filter_fn(|meta| meta.target() == "http_access"))
+    } else {
+        None
+    };
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(http_filter))
+        .init();
+}
+```

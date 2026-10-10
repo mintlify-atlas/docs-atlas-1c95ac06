@@ -1,0 +1,342 @@
+---
+title: "fmt Module API: Formatting and Logging Trace Data"
+sidebarTitle: "fmt"
+description: "The tracing-subscriber fmt module provides a human-readable and structured subscriber for logging spans and events to stdout, files, or any custom writer."
+---
+
+The `fmt` module in `tracing-subscriber` provides a complete, configurable subscriber for formatting and writing `tracing` spans and events as text. It is the most common starting point for instrumenting Rust applications: a single call to `tracing_subscriber::fmt::init()` installs a global subscriber that reads filter directives from the `RUST_LOG` environment variable and writes formatted log output to stdout. For production use, the module also exposes a composable `Layer` variant that can be stacked alongside other layers on top of a `Registry`, supporting per-layer filtering, JSON output, custom writers, and more.
+
+## Module-Level Functions
+
+### `fmt::init()`
+
+```rust
+pub fn init()
+```
+
+Installs a global formatting subscriber that filters based on the `RUST_LOG` environment variable. Panics if a global subscriber has already been installed.
+
+```rust
+fn main() {
+    tracing_subscriber::fmt::init();
+    tracing::info!("subscriber installed");
+}
+```
+
+### `fmt::try_init()`
+
+```rust
+pub fn try_init() -> Result<(), Box<dyn Error + Send + Sync + 'static>>
+```
+
+Like `init()`, but returns an error instead of panicking if a global subscriber was already set. Prefer this in library code or when composing with other initialization paths.
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::try_init()?;
+    Ok(())
+}
+```
+
+### `fmt::fmt()`
+
+```rust
+pub fn fmt() -> SubscriberBuilder
+```
+
+Returns a new `SubscriberBuilder` for configuring a formatting subscriber. Equivalent to `SubscriberBuilder::default()`.
+
+```rust
+tracing_subscriber::fmt()
+    .with_max_level(tracing::Level::DEBUG)
+    .compact()
+    .init();
+```
+
+### `fmt::layer()`
+
+```rust
+pub fn layer<S>() -> Layer<S>
+```
+
+Returns a new formatting `Layer` suitable for composing with a `Registry` and other layers. Equivalent to `Layer::default()`.
+
+```rust
+use tracing_subscriber::{fmt, prelude::*};
+
+tracing_subscriber::registry()
+    .with(fmt::layer().with_target(false))
+    .init();
+```
+
+---
+
+## `SubscriberBuilder`
+
+`SubscriberBuilder` is the primary configuration interface for the `fmt` subscriber. It is generic over four type parameters representing the field formatter (`N`), event formatter (`E`), filter (`F`), and writer (`W`), each of which can be replaced by the builder methods below.
+
+```rust
+pub struct SubscriberBuilder<
+    N = format::DefaultFields,
+    E = format::Format<format::Full>,
+    F = LevelFilter,
+    W = fn() -> io::Stdout,
+> { /* ... */ }
+```
+
+### Finalizing Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `.finish()` | `-> Subscriber<N, E, F, W>` | Builds and returns the configured subscriber. |
+| `.init()` | `-> ()` | Builds and sets as the global default. Panics if already set. |
+| `.try_init()` | `-> Result<(), Box<dyn Error + Send + Sync + 'static>>` | Builds and sets as the global default, returning an error on failure. |
+
+### Output Format Methods
+
+<Tabs>
+  <Tab title="Content">
+
+| Method | Description |
+|--------|-------------|
+| `.with_target(bool)` | Show or hide the event/span target (module path). Default: `true`. |
+| `.with_level(bool)` | Show or hide the verbosity level. Default: `true`. |
+| `.with_file(bool)` | Show or hide the source file path. Default: `false`. |
+| `.with_line_number(bool)` | Show or hide the source line number. Default: `false`. |
+| `.with_thread_ids(bool)` | Show or hide the current thread ID. Default: `false`. |
+| `.with_thread_names(bool)` | Show or hide the current thread name. Default: `false`. |
+| `.with_ansi(bool)` | Enable or disable ANSI terminal color codes. Requires the `ansi` feature. |
+| `.with_span_events(FmtSpan)` | Emit synthetic events at span lifecycle points (`NEW`, `ENTER`, `EXIT`, `CLOSE`, `FULL`, etc.). |
+
+  </Tab>
+  <Tab title="Format style">
+
+| Method | Type change | Description |
+|--------|-------------|-------------|
+| `.compact()` | `Format<Compact, T>` | Short, single-line output; fields appended to the event line. |
+| `.pretty()` | `Format<Pretty, T>` | Multi-line, human-readable output. Requires `ansi` feature. |
+| `.json()` | `Format<Json, T>` | Newline-delimited JSON. Requires `json` feature. |
+
+  </Tab>
+  <Tab title="Timers">
+
+| Method | Description |
+|--------|-------------|
+| `.with_timer(timer)` | Use a custom timer. Accepts any type implementing `FormatTime`. |
+| `.without_time()` | Disable timestamps entirely. |
+
+Built-in timers in `fmt::time`:
+
+| Type | Description |
+|------|-------------|
+| `SystemTime` | Absolute wall-clock time (default). |
+| `Uptime` | Time elapsed since the subscriber was created. |
+| `UtcTime` | UTC time formatted via the `time` crate (requires `time` feature). |
+| `LocalTime` | Local time (requires `time` feature + `local-time` feature). |
+
+  </Tab>
+</Tabs>
+
+### Filter Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `.with_max_level(filter)` | `-> SubscriberBuilder<N, E, LevelFilter, W>` | Set the maximum verbosity level. Accepts `Level` or `LevelFilter` values. |
+| `.with_env_filter(filter)` | `-> SubscriberBuilder<N, E, EnvFilter, W>` | Set an `EnvFilter` directive filter. Replaces any previously set filter. Requires `env-filter` feature. |
+
+### Writer Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `.with_writer(make_writer)` | `-> SubscriberBuilder<N, E, F, W2>` | Use a custom `MakeWriter` for output. |
+| `.with_test_writer()` | `-> SubscriberBuilder<N, E, F, TestWriter>` | Use `TestWriter`, which integrates with `cargo test`'s output capturing. |
+| `.map_writer(f)` | `-> SubscriberBuilder<N, E, F, W2>` | Transform the existing writer with a closure. |
+
+### JSON-specific Methods
+
+When `.json()` has been called (requires `json` feature):
+
+| Method | Description |
+|--------|-------------|
+| `.flatten_event(bool)` | Flatten event metadata fields into the top-level JSON object. |
+| `.with_current_span(bool)` | Include the current span in the formatted event output. Default: `true`. |
+| `.with_span_list(bool)` | Include a list of all entered spans (root → leaf) in the output. Default: `true`. |
+
+### Event Format / Field Formatter Methods
+
+| Method | Description |
+|--------|-------------|
+| `.event_format(fmt)` | Replace the event formatter with any type implementing `FormatEvent`. |
+| `.fmt_fields(formatter)` | Replace the field formatter with any type implementing `FormatFields`. |
+| `.map_event_format(f)` | Transform the existing event formatter with a closure. |
+| `.map_fmt_fields(f)` | Transform the existing field formatter with a closure. |
+
+---
+
+## `fmt::Layer<S, N, E, W>`
+
+The composable layer variant. Has the same configuration methods as `SubscriberBuilder` (those that do not involve the filter `F`), and is designed to be combined with a `Registry` and other layers.
+
+```rust
+pub type Layer<
+    S,
+    N = format::DefaultFields,
+    E = format::Format<format::Full>,
+    W = fn() -> io::Stdout,
+>; // = fmt_layer::Layer<S, N, E, W>
+```
+
+```rust
+use tracing_subscriber::{fmt, filter::LevelFilter, prelude::*};
+
+tracing_subscriber::registry()
+    .with(
+        fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_filter(LevelFilter::WARN)
+    )
+    .init();
+```
+
+---
+
+## Format Types (`fmt::format`)
+
+<CardGroup cols={2}>
+  <Card title="Full" icon="align-left">
+    **Default.** Human-readable, single-line logs. Each event includes a timestamp, level, target, and the full span context above the event fields.
+    ```
+    2024-01-15T10:00:00Z  INFO my_crate: event message span_field=value
+    ```
+  </Card>
+  <Card title="Compact" icon="compress">
+    Like `Full`, but optimized for shorter lines. Span fields are appended directly to the event line instead of being printed as a separate context.
+    ```
+    2024-01-15T10:00:00Z  INFO event message field=value
+    ```
+  </Card>
+  <Card title="Pretty" icon="star">
+    Multi-line, richly formatted output intended for local development and CLI tools. Requires the `ansi` feature for full color rendering.
+    ```
+      INFO my_crate: preparing to shave yaks
+        at src/main.rs:10
+        in yak_shaving with count=3
+    ```
+  </Card>
+  <Card title="Json" icon="code">
+    Newline-delimited JSON. Intended for structured log ingestion pipelines. Requires the `json` feature flag.
+    ```json
+    {"timestamp":"...","level":"INFO","target":"my_crate","fields":{"message":"..."}}
+    ```
+  </Card>
+</CardGroup>
+
+---
+
+## `MakeWriter` Trait
+
+The `MakeWriter<'a>` trait abstracts over how a writable destination is obtained for each log record. It enables writing to files, buffers, or custom sinks.
+
+```rust
+pub trait MakeWriter<'a> {
+    type Writer: io::Write;
+    fn make_writer(&'a self) -> Self::Writer;
+}
+```
+
+Common implementations include:
+
+- `fn() -> io::Stdout` / `fn() -> io::Stderr` — write to standard streams
+- `Arc<File>` — write to an open file handle
+- `NonBlocking` from `tracing-appender` — off-thread buffered writes
+- `TestWriter` — integrates with `libtest` output capture
+
+The `MakeWriterExt` trait (re-exported from `fmt::writer`) adds combinator methods:
+
+```rust
+use tracing::Level;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+// Write WARN and ERROR to stderr; everything else to stdout.
+let writer = std::io::stderr.with_max_level(Level::WARN)
+    .or_else(std::io::stdout);
+
+tracing_subscriber::fmt()
+    .with_writer(writer)
+    .init();
+```
+
+---
+
+## Complete Examples
+
+<Tabs>
+  <Tab title="Basic setup">
+```rust
+fn main() {
+    tracing_subscriber::fmt()
+        // enable everything
+        .with_max_level(tracing::Level::TRACE)
+        // sets this to be the default, global subscriber for this application.
+        .init();
+
+    tracing::info!(count = 3, "preparing to shave yaks");
+}
+```
+  </Tab>
+  <Tab title="Composing with Registry">
+```rust
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+
+fn main() {
+    let fmt_layer = fmt::layer()
+        .with_target(false);
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
+        .init();
+}
+```
+  </Tab>
+  <Tab title="Per-layer filters">
+```rust
+use tracing_subscriber::{
+    filter::{LevelFilter, Targets},
+    fmt,
+    prelude::*,
+};
+use std::io;
+
+fn main() {
+    // DEBUG and above → stdout (pretty)
+    let stdout_layer = fmt::layer()
+        .with_writer(io::stdout)
+        .pretty()
+        .with_filter(LevelFilter::DEBUG);
+
+    // WARN and above for specific targets → JSON file
+    let file_layer = fmt::layer()
+        .json()
+        .with_writer(std::io::stderr)
+        .with_filter(
+            Targets::new()
+                .with_target("my_app", LevelFilter::WARN)
+        );
+
+    tracing_subscriber::registry()
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+}
+```
+  </Tab>
+</Tabs>
+
+<Note>
+The `fmt` module requires the `fmt` and `std` feature flags (both enabled by default). JSON output requires the `json` feature. ANSI colors require the `ansi` feature. Time formatting with `UtcTime` or `LocalTime` requires the `time` feature.
+</Note>

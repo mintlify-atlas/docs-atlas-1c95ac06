@@ -1,0 +1,201 @@
+---
+title: "Enriching Errors with Span Context via tracing-error"
+sidebarTitle: "tracing-error"
+description: "Capture the active tracing span context at the point an error is created and surface it alongside the error message for faster debugging."
+---
+
+`tracing-error` bridges Rust's error-handling story with the tracing ecosystem. It provides the `SpanTrace` type, which snapshots the current span context at the moment it is constructed, and the `ErrorLayer` subscriber layer, which enables that capture. When an error is eventually displayed — whether in a log line, a panic message, or a human-readable report — the full span ancestry is available alongside it, so you can see exactly which request, task, or logical operation produced the failure.
+
+<Note>
+This crate is currently **experimental**. Its API may change before a stable 1.0 release. Requires rustc 1.71+.
+</Note>
+
+## Installation
+
+```toml
+[dependencies]
+tracing-error = "0.2"
+
+# Enable TracedError and its extension traits:
+# tracing-error = { version = "0.2", features = ["traced-error"] }
+```
+
+## Installing the ErrorLayer
+
+`SpanTrace::capture()` only works when an `ErrorLayer` has been added to the active subscriber. Without it, captured `SpanTrace`s have a status of `SpanTraceStatus::UNSUPPORTED` and display as empty. Add it once at application startup alongside any other layers:
+
+```rust
+use tracing_error::ErrorLayer;
+use tracing_subscriber::prelude::*;
+
+fn main() {
+    let subscriber = tracing_subscriber::Registry::default()
+        // other layers (fmt, OpenTelemetry, etc.) can be added before or after
+        .with(ErrorLayer::default());
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("failed to set global default subscriber");
+}
+```
+
+## The SpanTrace Type
+
+`SpanTrace` captures the current tracing span context when `SpanTrace::capture()` is called. Store it inside your custom error types and format it in their `Display` implementations:
+
+```rust
+use std::{fmt, error::Error};
+use tracing_error::SpanTrace;
+
+#[derive(Debug)]
+pub struct MyError {
+    message: String,
+    context: SpanTrace,
+}
+
+impl fmt::Display for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}\n\nSpan trace:", self.message)?;
+        self.context.fmt(f)?;
+        Ok(())
+    }
+}
+
+impl Error for MyError {}
+
+impl MyError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            context: SpanTrace::capture(),
+        }
+    }
+}
+```
+
+### Checking capture status
+
+`SpanTrace::status()` returns a `SpanTraceStatus` value you can inspect before attempting to format:
+
+```rust
+use tracing_error::{SpanTrace, SpanTraceStatus};
+
+let trace = SpanTrace::capture();
+
+match trace.status() {
+    SpanTraceStatus::CAPTURED => println!("captured: {}", trace),
+    SpanTraceStatus::EMPTY    => println!("no spans were active"),
+    SpanTraceStatus::UNSUPPORTED => println!("ErrorLayer is not installed"),
+    _ => {}
+}
+```
+
+## The `traced-error` Feature
+
+Enabling the `traced-error` feature unlocks additional types and traits for attaching a `SpanTrace` to an existing error value without creating a custom wrapper type.
+
+### InstrumentResult and InstrumentError
+
+The `InstrumentResult` trait adds an `.in_current_span()` method to any `Result<T, E>` where `E: Error + Send + Sync + 'static`. It wraps the error in a `TracedError<E>` that bundles the current span context:
+
+```rust
+use tracing_error::prelude::*; // brings InstrumentResult into scope
+
+fn read_config(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // The span context at this call site is attached to any I/O error
+    let content = std::fs::read_to_string(path).in_current_span()?;
+    Ok(content)
+}
+```
+
+`InstrumentError` provides the same capability directly on error values when you need finer control:
+
+```rust
+use tracing_error::InstrumentError;
+
+let err = some_fallible_operation().map_err(|e| e.in_current_span());
+```
+
+### TracedError
+
+`TracedError<E>` is a thin wrapper around an existing error type that additionally stores a `SpanTrace`. Its `Display` and `Debug` implementations automatically render the wrapped error followed by the captured span context — no custom formatting code required.
+
+### ExtractSpanTrace
+
+The `ExtractSpanTrace` trait lets you downcast a `dyn Error` trait object to retrieve its embedded `SpanTrace` without knowing the concrete type. This is useful in error-reporting middleware that wants to handle `SpanTrace`s specially:
+
+```rust
+use std::error::Error;
+use tracing_error::ExtractSpanTrace as _;
+
+fn print_extracted_spantraces(error: &(dyn Error + 'static)) {
+    let mut error = Some(error);
+    let mut ind = 0;
+
+    eprintln!("Error:");
+
+    while let Some(err) = error {
+        if let Some(spantrace) = err.span_trace() {
+            eprintln!("found a spantrace:\n{}", spantrace);
+        } else {
+            eprintln!("{:>4}: {}", ind, err);
+        }
+
+        error = err.source();
+        ind += 1;
+    }
+}
+```
+
+If you don't need to specialize on `SpanTrace`s, you can also print them naively through the normal error chain — `TracedError`'s `Display` impl will render the span context inline:
+
+```rust
+use std::error::Error;
+
+fn print_naive_spantraces(error: &(dyn Error + 'static)) {
+    let mut error = Some(error);
+    let mut ind = 0;
+
+    eprintln!("Error:");
+
+    while let Some(err) = error {
+        eprintln!("{:>4}: {}", ind, err);
+        error = err.source();
+        ind += 1;
+    }
+}
+```
+
+## Integration with color-eyre
+
+[`color-eyre`](https://crates.io/crates/color-eyre) provides a customized `eyre::Report` that automatically captures `SpanTrace`s and `Backtraces` on error construction and renders them with colorized, human-friendly formatting. It is one of the most popular ways to use `tracing-error` in applications:
+
+```toml
+[dependencies]
+color-eyre   = "0.6"
+tracing-error = { version = "0.2", features = ["traced-error"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+```rust
+use color_eyre::eyre::Result;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::prelude::*;
+
+fn main() -> Result<()> {
+    // color-eyre must be installed before any errors are created
+    color_eyre::install()?;
+
+    tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::fmt::layer())
+        .with(ErrorLayer::default())
+        .init();
+
+    // Any `?`-propagated errors will now carry a span trace
+    do_work()?;
+    Ok(())
+}
+```
+
+<Tip>
+`color-spantrace` is a companion crate that renders `SpanTrace` values using the same style as `color-backtrace`, making them easier to scan in terminal output.
+</Tip>

@@ -1,0 +1,250 @@
+---
+title: "Migrating from log to tracing"
+sidebarTitle: "log Migration"
+description: "Learn how to migrate from the log crate to tracing, with strategies for full replacement, incremental bridging, and library compatibility."
+---
+
+Moving from the [`log`](https://docs.rs/log) crate to `tracing` unlocks structured fields, span-based context propagation, and seamless async diagnostics — all while maintaining backward compatibility with the vast library ecosystem that still emits `log` records. This guide walks through three migration strategies and helps you choose the right one for your project.
+
+## Why Migrate?
+
+The `log` crate provides a simple, lightweight logging facade, but it models log output as a sequence of unordered text lines. `tracing` builds on that foundation with three important additions:
+
+- **Structured fields** — record typed key-value data alongside messages, e.g. `user_id = 42, status = "ok"`.
+- **Spans** — represent a period of time with a beginning and end, allowing events to be grouped by the work that produced them.
+- **Async context** — spans propagate through `.await` points (via `#[instrument]` or `Future::instrument`), solving the interleaved-output problem that makes `log` hard to use with Tokio.
+
+---
+
+## Strategy A — Full Migration
+
+Replace every `log` macro call with its `tracing` equivalent and swap `env_logger` for `tracing_subscriber::fmt`.
+
+### Macro Equivalents
+
+The shorthand event macros in `tracing` share the same names and accept the same format-string syntax as `log`, so the mechanical replacement is straightforward:
+
+| `log` macro | `tracing` macro |
+|---|---|
+| `log::error!(…)` | `tracing::error!(…)` |
+| `log::warn!(…)` | `tracing::warn!(…)` |
+| `log::info!(…)` | `tracing::info!(…)` |
+| `log::debug!(…)` | `tracing::debug!(…)` |
+| `log::trace!(…)` | `tracing::trace!(…)` |
+
+### Before / After Code
+
+```rust
+// Before — using the log crate
+use log::{debug, error, info, warn}; // [!code --]
+
+pub fn process(request_id: u64, payload: &str) { // [!code --]
+    info!("processing request {}", request_id); // [!code --]
+    debug!("payload length: {}", payload.len()); // [!code --]
+    if payload.is_empty() { // [!code --]
+        warn!("empty payload for request {}", request_id); // [!code --]
+    } // [!code --]
+} // [!code --]
+
+// After — using tracing
+use tracing::{debug, info, warn}; // [!code ++]
+
+pub fn process(request_id: u64, payload: &str) { // [!code ++]
+    info!(request_id, "processing request"); // [!code ++]
+    debug!(len = payload.len(), "payload info"); // [!code ++]
+    if payload.is_empty() { // [!code ++]
+        warn!(request_id, "empty payload"); // [!code ++]
+    } // [!code ++]
+} // [!code ++]
+```
+
+Notice how structured fields (`request_id`, `len`) are promoted to first-class key-value pairs rather than embedded in the format string. This makes downstream filtering and parsing far more reliable.
+
+### Cargo.toml Changes
+
+```toml
+[dependencies]
+# Remove env_logger and log as direct dependencies
+log = "0.4"           # [!code --]
+env_logger = "0.11"   # [!code --]
+
+# Add tracing and tracing-subscriber
+tracing = "0.1"                      # [!code ++]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] } # [!code ++]
+```
+
+### Initialisation
+
+```rust
+// Before
+env_logger::init(); // [!code --]
+
+// After
+tracing_subscriber::fmt::init(); // [!code ++]
+```
+
+`tracing_subscriber::fmt::init()` reads the `RUST_LOG` environment variable using the same syntax as `env_logger`, so existing deployment scripts require no changes.
+
+<Steps>
+  <Step title="Add tracing to Cargo.toml">
+    Add `tracing` and `tracing-subscriber` as dependencies and remove `log` / `env_logger`.
+
+    ```toml
+    [dependencies]
+    tracing = "0.1"
+    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+    ```
+  </Step>
+  <Step title="Replace the initialiser in main.rs">
+    ```rust
+    fn main() {
+        tracing_subscriber::fmt::init();
+        // rest of your application
+    }
+    ```
+  </Step>
+  <Step title="Replace log macros with tracing macros">
+    Search your codebase for `use log::` and replace with `use tracing::`. The macro signatures are compatible for simple string messages; take the opportunity to promote format arguments to named fields.
+  </Step>
+  <Step title="Add #[instrument] to key functions">
+    Annotate important functions with `#[tracing::instrument]` to automatically create spans and record function arguments as structured fields:
+
+    ```rust
+    #[tracing::instrument]
+    pub async fn handle_request(id: u64, body: String) {
+        tracing::info!("handling request");
+    }
+    ```
+  </Step>
+  <Step title="Run and verify">
+    ```bash
+    RUST_LOG=debug cargo run
+    ```
+
+    The output format is slightly different from `env_logger` but respects the same `RUST_LOG` filter syntax.
+  </Step>
+</Steps>
+
+---
+
+## Strategy B — Incremental Migration with tracing-log Bridge
+
+If your codebase is large or you have many dependencies still using `log`, you can keep existing `log` instrumentation in place and redirect it into the `tracing` subscriber using the [`tracing-log`](https://docs.rs/tracing-log) crate.
+
+### How it Works
+
+`tracing-log` provides `LogTracer`, a `log::Log` implementation that converts every `log::Record` into a `tracing::Event` and dispatches it to the active `tracing` subscriber. This lets libraries that emit `log` records appear inside the correct span context.
+
+### Setup
+
+```toml
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
+```
+
+```rust
+use tracing_log::LogTracer;
+
+fn main() {
+    // Redirect all log records to tracing
+    LogTracer::init().expect("failed to set log tracer");
+
+    // Set up the tracing subscriber as normal
+    tracing_subscriber::fmt::init();
+
+    // Both of these are now visible through the tracing subscriber:
+    log::debug!("this is a log line");
+    tracing::debug!("this is a tracing line");
+}
+```
+
+<Tip>
+  `tracing-subscriber`'s `fmt` subscriber already depends on `tracing-log` with the `log-tracer` feature enabled by default. Calling `tracing_subscriber::fmt::init()` is all you need — you do not need to call `LogTracer::init()` separately unless you are building a custom subscriber stack without the `fmt` layer.
+</Tip>
+
+### Incremental Migration Path
+
+With `LogTracer` in place, you can migrate crate by crate:
+
+1. Libraries can keep emitting `log` records — they will be captured.
+2. As you migrate each module, switch its macros to `tracing` and add `#[instrument]` to gain span context.
+3. Only when the entire codebase uses `tracing` directly should you remove `tracing-log` from your dependency tree.
+
+<Note>
+  Be careful not to use both a `log::Logger` that converts records to tracing events **and** a `tracing` subscriber that converts events back to `log` records. This creates an infinite dispatch loop. Use one direction only.
+</Note>
+
+---
+
+## Strategy C — Library Compatibility: Emitting log Records from tracing
+
+If you are writing a **library** and want your `tracing` instrumentation to be visible to applications that use `log` (without a `tracing` subscriber installed), enable the `log` feature on the `tracing` crate.
+
+### The `log` and `log-always` Features
+
+From the `tracing` crate documentation:
+
+- **`log`**: when enabled, invoking an event macro or creating a span emits a `log::Record` **only if** no `tracing` subscriber is active. This lets library users receive diagnostic output regardless of whether they use `tracing` or `log`.
+- **`log-always`**: emits `log::Record`s even when a `tracing` subscriber *is* set. Use this only in applications that intentionally collect traces and text logs separately.
+
+```toml
+# In a library's Cargo.toml
+[dependencies]
+tracing = { version = "0.1", features = ["log"] }
+```
+
+```toml
+# In an application's Cargo.toml (use sparingly)
+[dependencies]
+tracing = { version = "0.1", features = ["log-always"] }
+```
+
+### When to Use Each Feature
+
+| Scenario | Recommended feature |
+|---|---|
+| Library that wants compatibility with `log` users | `log` |
+| Application collecting traces and separate text logs | `log-always` |
+| Application using only `tracing` | neither (default) |
+
+<Warning>
+  Libraries should generally **not** enable `log-always`. Doing so prevents application authors from opting out of the duplicate `log` records, and can cause double-logging when an adapter converts those records back to `tracing` events.
+</Warning>
+
+---
+
+## Quick Reference
+
+```rust
+// A complete minimal application using tracing
+use tracing::{debug, error, info, instrument, warn};
+use tracing_subscriber::{fmt, EnvFilter};
+
+#[instrument]
+pub fn shave(yak: usize) -> Result<(), std::io::Error> {
+    debug!(excitement = "yay!", "hello! I'm gonna shave a yak.");
+    if yak == 3 {
+        warn!("could not locate yak!");
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "shaving yak failed!"));
+    } else {
+        debug!("yak shaved successfully");
+    }
+    Ok(())
+}
+
+fn main() {
+    // Initialise a subscriber that reads RUST_LOG for filtering
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    info!(yaks = 3, "preparing to shave yaks");
+    for i in 1..=3 {
+        if let Err(e) = shave(i) {
+            error!(yak = i, error = %e, "failed to shave yak");
+        }
+    }
+}
+```

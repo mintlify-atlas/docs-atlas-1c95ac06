@@ -1,0 +1,124 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Tracing",
+  "projectDescription": "A scoped, structured, and async-aware diagnostics framework for Rust that provides spans, events, and a composable subscriber system for recording application-level trace data.",
+  "theme": "luma",
+  "primaryColor": "#3873ad",
+  "lightColor": "#a473e4",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Instrumentation",
+            "pages": [
+              "instrumentation/spans",
+              "instrumentation/events",
+              "instrumentation/instrument-macro",
+              "instrumentation/async-code"
+            ]
+          },
+          {
+            "group": "Subscribers & Layers",
+            "pages": [
+              "subscribers/overview",
+              "subscribers/fmt-subscriber",
+              "subscribers/env-filter",
+              "subscribers/composing-layers",
+              "subscribers/custom-subscribers"
+            ]
+          },
+          {
+            "group": "Ecosystem Crates",
+            "pages": [
+              "ecosystem/tracing-appender",
+              "ecosystem/tracing-error",
+              "ecosystem/tracing-flame",
+              "ecosystem/tracing-log",
+              "ecosystem/third-party"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/logging-migration",
+              "guides/no-std",
+              "guides/performance"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/macros",
+              "api/span",
+              "api/event",
+              "api/subscriber",
+              "api/dispatcher"
+            ]
+          },
+          {
+            "group": "tracing-subscriber",
+            "pages": [
+              "api/tracing-subscriber/layer",
+              "api/tracing-subscriber/fmt",
+              "api/tracing-subscriber/filter",
+              "api/tracing-subscriber/registry"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Structured, typed span and event fields",
+    "Async-aware tracing with first-class async/await support",
+    "#[instrument] procedural macro for zero-boilerplate function instrumentation",
+    "Composable Layer system for building flexible subscriber pipelines",
+    "EnvFilter for runtime log-level filtering via RUST_LOG",
+    "Non-blocking file appender for high-throughput logging",
+    "Flamegraph generation via tracing-flame",
+    "Error enrichment with span context via tracing-error",
+    "Compatibility with the log crate via tracing-log",
+    "no_std support"
+  ],
+  "publicApiSurface": [
+    "tracing::span! macro",
+    "tracing::event! macro",
+    "tracing::trace! / debug! / info! / warn! / error! macros",
+    "tracing::trace_span! / debug_span! / info_span! / warn_span! / error_span! macros",
+    "tracing::instrument attribute macro (#[instrument])",
+    "tracing::Span struct",
+    "tracing::Event struct",
+    "tracing::Subscriber trait",
+    "tracing::Level enum",
+    "tracing::Instrument trait",
+    "tracing::dispatcher module",
+    "tracing_subscriber::fmt module",
+    "tracing_subscriber::layer::Layer trait",
+    "tracing_subscriber::EnvFilter",
+    "tracing_subscriber::Registry",
+    "tracing_appender::rolling module",
+    "tracing_appender::non_blocking",
+    "tracing_error::SpanTrace",
+    "tracing_error::ErrorLayer",
+    "tracing_flame::FlameLayer",
+    "tracing_core::Subscriber trait",
+    "tracing_core::Metadata",
+    "tracing_core::Field / FieldSet / Value"
+  ]
+}

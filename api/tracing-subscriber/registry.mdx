@@ -1,0 +1,315 @@
+---
+title: "Registry API: Span Storage for tracing-subscriber"
+sidebarTitle: "Registry"
+description: "The Registry struct is tracing-subscriber's default Subscriber and span store, exposing span data to composed layers via the LookupSpan trait."
+---
+
+The `Registry` is the recommended root `Subscriber` for most `tracing-subscriber` applications. Rather than formatting or recording spans itself, `Registry` focuses entirely on *storing* span data and *exposing* it to composed layers. When layers are stacked on top of a `Registry`, they can look up parent spans, walk the span ancestry, and attach their own private per-span data — all through a high-performance, lock-free concurrent data structure backed by a sharded slab. This separation of concerns means logging, metrics, distributed tracing, and per-layer filters can all share the same span storage without duplicating data or coordination logic.
+
+## The `Registry` Struct
+
+```rust
+// Requires features: "registry", "std"
+pub struct Registry { /* lock-free sharded slab */ }
+```
+
+`Registry` implements `tracing_core::Subscriber`, making it a valid root for a layer stack. It is responsible for:
+
+- Generating unique span IDs within a process lifetime
+- Storing per-span metadata, parent IDs, and field data
+- Tracking the currently entered span per thread
+- Providing a typed extension slot (`Extensions`) per span for layer-specific data
+- Supporting per-layer filtering via registered `FilterId`s
+
+### Creating a Registry
+
+```rust
+// Via Default::default()
+let registry = tracing_subscriber::Registry::default();
+
+// Via the tracing_subscriber::registry() convenience function
+let registry = tracing_subscriber::registry();
+```
+
+Both are equivalent. The convenience function `tracing_subscriber::registry()` is the idiomatic entrypoint:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .init();
+```
+
+---
+
+## The `LookupSpan<'a>` Trait
+
+Subscribers that store span data and associate it with span IDs implement `LookupSpan`. Layers can use this trait to access span data when `S: for<'lookup> LookupSpan<'lookup>` is declared as a bound.
+
+```rust
+pub trait LookupSpan<'a> {
+    type Data: SpanData<'a>;
+
+    /// Returns the raw span data for a given ID.
+    /// Prefer `span()` in most layer implementations.
+    fn span_data(&'a self, id: &Id) -> Option<Self::Data>;
+
+    /// Returns a SpanRef for the span with the given ID, if it exists.
+    fn span(&'a self, id: &Id) -> Option<SpanRef<'a, Self>>
+    where
+        Self: Sized;
+
+    /// Registers a per-layer Filter and returns its FilterId.
+    /// Called internally by Filtered layers; rarely called manually.
+    #[cfg(feature = "registry")]
+    fn register_filter(&mut self) -> FilterId;
+}
+```
+
+`Registry` implements `LookupSpan`. Layers that need span lookups should add the bound:
+
+```rust
+use tracing_subscriber::{layer::Layer, registry::LookupSpan};
+use tracing_core::Subscriber;
+
+impl<S> Layer<S> for MyLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    // ctx.span(id), ctx.lookup_current(), etc. are now available
+}
+```
+
+---
+
+## `SpanRef<'a, R>` — A Reference to a Stored Span
+
+`SpanRef` provides access to a span's data and the registry it was stored in. It is returned by `LookupSpan::span` and by `Context` lookup methods.
+
+```rust
+pub struct SpanRef<'a, R: LookupSpan<'a>> {
+    registry: &'a R,
+    data: R::Data,
+    // ...
+}
+```
+
+### Methods on `SpanRef`
+
+| Method | Return type | Description |
+|--------|-------------|-------------|
+| `.id()` | `span::Id` | Returns the span's numeric ID. |
+| `.name()` | `&'static str` | Returns the span's name from its metadata. |
+| `.metadata()` | `&'static Metadata<'static>` | Returns the full static metadata (level, target, file, line). |
+| `.fields()` | `&FieldSet` | Returns the set of fields defined at the span's callsite. |
+| `.parent()` | `Option<SpanRef<'a, R>>` | Returns a `SpanRef` for this span's parent, or `None` for root spans. |
+| `.scope()` | `Scope<'a, R>` | Returns an iterator over all ancestors, starting from this span (leaf → root). |
+| `.extensions()` | `Extensions<'_>` | Returns a read-only guard over the span's extension map. |
+| `.extensions_mut()` | `ExtensionsMut<'_>` | Returns a write guard over the span's extension map. |
+
+### Walking the Span Ancestry
+
+```rust
+fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+    if let Some(span) = ctx.span(id) {
+        // Leaf to root:
+        let names: Vec<_> = span.scope().map(|s| s.name()).collect();
+        println!("entered: {:?}", names);
+
+        // Root to leaf:
+        let names: Vec<_> = span.scope().from_root().map(|s| s.name()).collect();
+        println!("path from root: {:?}", names);
+    }
+}
+```
+
+---
+
+## `Extensions` and `ExtensionsMut`
+
+Each span stored in the `Registry` has an associated *extension map* — a type-indexed `HashMap` that layers use to attach their own private per-span data. Extensions are shared across all layers; use newtypes to avoid accidental cross-layer collisions.
+
+### `Extensions<'_>` — Read-Only Access
+
+```rust
+pub struct Extensions<'a> { /* RwLock read guard */ }
+
+impl<'a> Extensions<'a> {
+    /// Borrow a previously inserted value of type T.
+    pub fn get<T: 'static>(&self) -> Option<&T>;
+}
+```
+
+### `ExtensionsMut<'_>` — Mutable Access
+
+```rust
+pub struct ExtensionsMut<'a> { /* RwLock write guard */ }
+
+impl<'a> ExtensionsMut<'a> {
+    /// Insert a value. Panics if T is already present; use replace() to overwrite.
+    pub fn insert<T: Send + Sync + 'static>(&mut self, val: T);
+
+    /// Insert or replace a value. Returns the old value if one was present.
+    pub fn replace<T: Send + Sync + 'static>(&mut self, val: T) -> Option<T>;
+
+    /// Borrow a mutable reference to a previously inserted value.
+    pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T>;
+
+    /// Remove and return a previously inserted value.
+    pub fn remove<T: Send + Sync + 'static>(&mut self) -> Option<T>;
+}
+```
+
+<Warning>
+Extensions are **span**-specific, not layer-specific. All layers share the same extension map for a given span. Use newtype wrappers (e.g., `struct MyLayerTimestamp(Instant)`) rather than bare standard types to avoid unintentional sharing between layers.
+</Warning>
+
+### Storing Custom Data Per Span
+
+A common pattern is for a layer to store its own data in a span's extensions during `on_new_span`, and retrieve it later in `on_event` or `on_close`:
+
+```rust
+use std::time::Instant;
+use tracing_subscriber::{layer::Layer, registry::LookupSpan};
+use tracing_core::{span, Subscriber};
+
+/// A newtype so other layers don't accidentally clobber our timestamp.
+struct SpanStart(Instant);
+
+pub struct TimingLayer;
+
+impl<S> Layer<S> for TimingLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        _attrs: &span::Attributes<'_>,
+        id: &span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(id).unwrap();
+        span.extensions_mut().insert(SpanStart(Instant::now()));
+    }
+
+    fn on_close(
+        &self,
+        id: span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(&id).unwrap();
+        if let Some(SpanStart(start)) = span.extensions().get::<SpanStart>() {
+            println!("span '{}' took {:?}", span.name(), start.elapsed());
+        }
+    }
+}
+
+fn main() {
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::registry()
+        .with(TimingLayer)
+        .init();
+
+    let span = tracing::info_span!("database_query");
+    let _guard = span.enter();
+    // ... do work ...
+    drop(_guard); // on_close fires here
+}
+```
+
+---
+
+## The `prelude` Module
+
+The `tracing_subscriber::prelude` module re-exports the most commonly needed traits in a single glob import. It is the recommended way to bring the library's extension traits into scope:
+
+```rust
+use tracing_subscriber::prelude::*;
+```
+
+This brings in:
+
+| Trait | Purpose |
+|-------|---------|
+| `SubscriberExt` | Adds `.with(layer)` to any `Subscriber`. |
+| `SubscriberInitExt` | Adds `.init()` and `.try_init()` to any `Subscriber`. |
+| `Layer` (as `_`) | The layer trait itself (for blanket implementations). |
+
+With the prelude, the full layer composition pattern becomes:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()      // -> Registry
+    .with(my_layer_a)               // -> Layered<A, Registry>
+    .with(my_layer_b)               // -> Layered<B, Layered<A, Registry>>
+    .init();                        // sets global default, returns ()
+```
+
+---
+
+## Complete Registry Example
+
+```rust
+use tracing_subscriber::{
+    filter::LevelFilter,
+    fmt,
+    prelude::*,
+    registry::LookupSpan,
+    Layer,
+};
+use tracing_core::{span, Subscriber};
+use std::time::Instant;
+
+struct SpanStart(Instant);
+
+struct TimingLayer;
+
+impl<S> Layer<S> for TimingLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        _: &span::Attributes<'_>,
+        id: &span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        ctx.span(id)
+            .unwrap()
+            .extensions_mut()
+            .insert(SpanStart(Instant::now()));
+    }
+
+    fn on_close(
+        &self,
+        id: span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(&id).unwrap();
+        if let Some(SpanStart(t)) = span.extensions().get::<SpanStart>() {
+            tracing::info!(
+                duration_ms = t.elapsed().as_millis(),
+                span = span.name(),
+                "span closed",
+            );
+        }
+    }
+}
+
+fn main() {
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(LevelFilter::INFO))
+        .with(TimingLayer)
+        .init();
+
+    let _span = tracing::info_span!("processing").entered();
+    tracing::info!("doing work");
+}
+```
+
+<Tip>
+`Registry` is designed for high-concurrency workloads. Its sharded slab implementation avoids global locks on span creation and lookup, making it well-suited for async runtimes with many concurrent tasks.
+</Tip>

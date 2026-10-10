@@ -1,0 +1,304 @@
+---
+title: "Writing Custom Subscribers and Layers"
+sidebarTitle: "Custom Subscribers"
+description: "Implement the Layer or Subscriber trait to route tracing data to custom sinks, metrics systems, or external observability backends."
+---
+
+The built-in `fmt` subscriber and `EnvFilter` cover the most common use cases, but `tracing`'s real power lies in how easily you can hook into the instrumentation pipeline for custom purposes. You might want to count events as metrics, route spans to a distributed tracing backend, capture structured data for testing, or apply domain-specific logic before deciding whether to record an event. This guide walks through the two extension points available: the `Layer` trait for composable additions to an existing pipeline, and the `Subscriber` trait for full control over the collection strategy.
+
+## When to Write a Custom `Layer` vs a Custom `Subscriber`
+
+<Steps>
+  <Step title="Start with a custom Layer">
+    The `Layer` trait is almost always the right choice. Because `Layer`s compose with `Registry` and other layers, you get per-span storage, span context lookup, per-layer filtering, and interoperability with `fmt` and `EnvFilter` for free. A custom `Layer` is the idiomatic way to route trace data to any external system.
+  </Step>
+  <Step title="Only implement Subscriber directly when you need full control">
+    Implementing `Subscriber` directly means taking on span ID generation and storage yourself. This is appropriate for specialised runtimes (embedded systems, custom allocators) or when you need a radically different data model that does not fit the `Registry` abstraction. In practice, the vast majority of real-world use cases are best served by a `Layer`.
+  </Step>
+</Steps>
+
+## Implementing the `Layer` Trait
+
+The `Layer<S>` trait is generic over the root subscriber type `S`. For a layer that needs to look up span data, bound `S` with `for<'a> LookupSpan<'a>`. If your layer only processes events and does not need span context, a simple `S: Subscriber` bound is sufficient.
+
+Here is a minimal custom layer that prints every event to a custom sink:
+
+```rust
+use tracing_core::{Event, Subscriber};
+use tracing_subscriber::{layer::Context, Layer};
+
+pub struct PrintLayer;
+
+impl<S: Subscriber> Layer<S> for PrintLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        println!("EVENT: {:?}", event.metadata().name());
+    }
+}
+```
+
+Install it with a `Registry`:
+
+```rust
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(PrintLayer)
+    .init();
+```
+
+### Full Set of Notification Methods
+
+The `Layer` trait has default no-op implementations for all methods. Override only what you need:
+
+```rust
+use tracing_core::{span, Event, Metadata, Subscriber};
+use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+
+pub struct VerboseLayer;
+
+impl<S> Layer<S> for VerboseLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    /// Called when a new span is created.
+    fn on_new_span(
+        &self,
+        attrs: &span::Attributes<'_>,
+        id: &span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let span = ctx.span(id).expect("span not found");
+        println!("new span: name={}", span.name());
+        // attrs.record(&mut MyVisitor) can capture field values here
+        let _ = attrs;
+    }
+
+    /// Called when a span records additional field values.
+    fn on_record(
+        &self,
+        id: &span::Id,
+        values: &span::Record<'_>,
+        _ctx: Context<'_, S>,
+    ) {
+        let _ = (id, values);
+    }
+
+    /// Called when a span is entered (execution moves into it).
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(id).expect("span not found");
+        println!("→ enter: {}", span.name());
+    }
+
+    /// Called when a span is exited (execution moves out of it).
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(id).expect("span not found");
+        println!("← exit: {}", span.name());
+    }
+
+    /// Called when a span is dropped / permanently closed.
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(&id).expect("span not found");
+        println!("✗ close: {}", span.name());
+    }
+
+    /// Called for each event.
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let level = event.metadata().level();
+        let target = event.metadata().target();
+        // ctx.current_span() gives the innermost active span
+        let current = ctx.current_span();
+        println!(
+            "[{}] {}: (in span {:?})",
+            level, target, current.id()
+        );
+    }
+}
+```
+
+## Accessing Span Data: `SpanRef` and `Extensions`
+
+Layers that need span data — such as the fields recorded on a span or its lineage — access it through `Context::span`, which returns a `SpanRef`. `SpanRef` provides the span's `Metadata`, parent ID, and field set, and also gives access to the `Extensions` map.
+
+```rust
+use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+use tracing_core::{span, Subscriber};
+
+impl<S> Layer<S> for VerboseLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        let span_ref = ctx.span(id).expect("span not found");
+
+        // Access static metadata
+        println!("entering span '{}' (target: {})",
+            span_ref.name(),
+            span_ref.metadata().target()
+        );
+
+        // Walk the parent chain (leaf → root)
+        let ancestors: Vec<_> = span_ref
+            .scope()
+            .map(|s| s.name())
+            .collect();
+        println!("  scope (leaf→root): {:?}", ancestors);
+    }
+}
+```
+
+## Storing Per-Span Data with Extensions
+
+The `Extensions` type-map lets layers attach arbitrary typed data to a span. This is how `fmt::Layer` stores pre-formatted field strings, and how you can store your own computed state (e.g. a start timestamp for latency tracking):
+
+```rust
+use std::time::Instant;
+use tracing_core::{span, Subscriber};
+use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+
+pub struct TimingLayer;
+
+impl<S> Layer<S> for TimingLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, _attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(id).expect("span not found");
+        // Insert a start time into the span's extension map
+        span.extensions_mut().insert(Instant::now());
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(&id).expect("span not found");
+        // Retrieve the start time we stored earlier
+        if let Some(start) = span.extensions().get::<Instant>() {
+            let elapsed = start.elapsed();
+            println!("span '{}' took {:?}", span.name(), elapsed);
+        }
+    }
+}
+```
+
+<Tip>
+`extensions_mut()` returns an `ExtensionsMut` guard. Insert a value with `.insert(val)` and retrieve it later with `extensions().get::<T>()`. Only one value of each type can be stored per span; inserting a second value of the same type replaces the first.
+</Tip>
+
+## Implementing `Subscriber` Directly
+
+For advanced use cases where the `Layer`/`Registry` model is not appropriate, you can implement `tracing_core::Subscriber` directly. You must provide implementations for all required methods:
+
+| Method | Responsibility |
+|---|---|
+| `new_span` | Generate and return a unique `span::Id` for the new span |
+| `record` | Store additional field values recorded on an existing span |
+| `record_follows_from` | Record a causality relationship between two spans |
+| `enabled` | Return `true` if the given `Metadata` should be collected |
+| `event` | Process a tracing event |
+| `enter` | Mark a span as entered in the current thread context |
+| `exit` | Mark a span as exited in the current thread context |
+
+```rust
+use tracing_core::{span, subscriber::Subscriber, Event, Metadata};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct MinimalSubscriber {
+    next_id: AtomicU64,
+}
+
+impl MinimalSubscriber {
+    pub fn new() -> Self {
+        Self { next_id: AtomicU64::new(1) }
+    }
+}
+
+impl Subscriber for MinimalSubscriber {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // Only record INFO and above
+        metadata.level() <= &tracing_core::Level::INFO
+    }
+
+    fn new_span(&self, attrs: &span::Attributes<'_>) -> span::Id {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = attrs; // inspect attrs.metadata() or attrs.fields() here
+        span::Id::from_u64(id)
+    }
+
+    fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        println!("[{}] {}", event.metadata().level(), event.metadata().target());
+    }
+
+    fn enter(&self, _span: &span::Id) {}
+
+    fn exit(&self, _span: &span::Id) {}
+}
+```
+
+Install it globally:
+
+```rust
+tracing::subscriber::set_global_default(MinimalSubscriber::new())
+    .expect("failed to set subscriber");
+```
+
+<Warning>
+A hand-rolled `Subscriber` does not automatically get per-span storage, parent tracking, or the extension system provided by `Registry`. You will need to implement those yourself if your layers require them.
+</Warning>
+
+## Using `with_default` for Test Isolation
+
+In tests, use `tracing::subscriber::with_default` to scope a subscriber to a single closure without affecting other tests running in parallel:
+
+```rust
+#[test]
+fn test_my_function_emits_span() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        // All tracing inside this closure uses `subscriber`.
+        my_instrumented_function();
+    });
+}
+```
+
+`with_default` returns the closure's return value, so you can capture results:
+
+```rust
+let result = tracing::subscriber::with_default(subscriber, || {
+    my_function_that_returns_a_value()
+});
+assert_eq!(result, 42);
+```
+
+## Testing Subscriber Behaviour with `tracing-mock`
+
+The [`tracing-mock`](https://crates.io/crates/tracing-mock) crate provides a mock subscriber and assertion helpers for verifying that your code emits the expected spans and events. It lets you write declarative expectations:
+
+```rust
+// Cargo.toml (dev-dependencies)
+// tracing-mock = "0.1"
+
+use tracing_mock::{expect, subscriber};
+
+#[test]
+fn test_event_is_emitted() {
+    let (subscriber, handle) = subscriber::mock()
+        .event(expect::event().at_level(tracing::Level::INFO))
+        .run_with_handle();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("hello from the test");
+    });
+
+    handle.assert_finished();
+}
+```
+
+<Note>
+`tracing-mock` is developed alongside `tracing` in the same repository and is the recommended way to write unit tests for code that produces tracing instrumentation.
+</Note>

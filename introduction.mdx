@@ -1,0 +1,88 @@
+---
+title: "Tracing: Application-Level Diagnostics for Rust"
+sidebarTitle: "Introduction"
+description: "tracing is a framework for instrumenting Rust programs to collect structured, event-based diagnostic information with spans, events, and subscribers."
+---
+
+`tracing` is a framework for instrumenting Rust programs to collect structured, event-based diagnostic information. Maintained by the Tokio project and published on [crates.io](https://crates.io/crates/tracing) under the MIT license, `tracing` does _not_ require the Tokio async runtime — it works equally well in synchronous programs, other async runtimes, and `no_std` environments.
+
+## Why Tracing Instead of Plain Logging?
+
+Traditional log messages record a _moment in time_: a single line of text written to stdout or a file. In asynchronous systems like Tokio — where thousands of tasks multiplex across a handful of threads — those flat log lines intermix, making it nearly impossible to follow the logic flow of any individual request.
+
+`tracing` expands upon logging-style diagnostics by adding two critical dimensions:
+
+- **Temporality** — a `Span` has a beginning and an end. It can be entered and exited by the flow of execution, and it can exist within a nested tree of similar spans. You can see _how long_ something took and _what was happening_ when it happened.
+- **Causality** — events emitted inside a span are causally linked to it. You know that a `WARN` log line about a missing database row occurred _during_ the `handle_request` span for user ID 42, not just that it occurred at 14:32:07.
+
+In addition, spans and events are _structured_: they carry typed key-value fields (integers, strings, booleans, anything implementing the `Value` trait), not just free-form text strings.
+
+```rust
+use tracing::{info, warn, span, Level};
+
+let span = span!(Level::INFO, "handle_request", user_id = 42u64);
+let _enter = span.enter();
+
+info!(status = 200u16, "request completed");
+warn!(retries = 3u32, "upstream was slow");
+```
+
+## Structured vs. Unstructured Diagnostics
+
+| | `log` crate | `tracing` |
+|---|---|---|
+| Data model | Unstructured text messages | Typed key-value fields |
+| Temporal context | None | Spans with enter/exit |
+| Async-safe | N/A | Yes (via `#[instrument]`) |
+| Filtering | Level + target string | Level, target, span context |
+| Ecosystem | Vast | Growing rapidly |
+
+`tracing`'s event macros (`trace!`, `debug!`, `info!`, `warn!`, `error!`) are intentionally syntax-compatible with the `log` crate, so migrating an existing project often starts with a simple find-and-replace on import paths.
+
+## Workspace Structure
+
+The `tokio-rs/tracing` repository is a Cargo workspace containing several focused crates:
+
+| Crate | Purpose |
+|---|---|
+| [`tracing`](https://crates.io/crates/tracing) | Primary instrumentation API — macros, `Span`, `Event`, `Subscriber` trait |
+| [`tracing-core`](https://crates.io/crates/tracing-core) | Stable core primitives (`span::Id`, `Event`, `Subscriber`, `Field`, `Dispatch`) |
+| [`tracing-subscriber`](https://crates.io/crates/tracing-subscriber) | Ready-to-use `Subscriber` implementations including the `fmt` formatter |
+| [`tracing-appender`](https://crates.io/crates/tracing-appender) | File appenders, rolling writers, and non-blocking output |
+| [`tracing-attributes`](https://crates.io/crates/tracing-attributes) | The `#[instrument]` procedural macro attribute |
+| [`tracing-error`](https://crates.io/crates/tracing-error) | `SpanTrace` — attach span context directly to error types |
+| [`tracing-flame`](https://crates.io/crates/tracing-flame) | Generate flame graphs from span entry/exit events |
+| [`tracing-log`](https://crates.io/crates/tracing-log) | Compatibility layer to consume `log` records as `tracing` events |
+
+**Libraries** should depend only on `tracing` (or `tracing-core` for maximum stability). **Applications** add `tracing-subscriber` (and optionally other output crates) to actually collect and display diagnostics.
+
+## Version and License Information
+
+| | |
+|---|---|
+| Current version | `0.1.44` |
+| Minimum supported Rust | **1.71** |
+| License | MIT |
+| Repository | [github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
+| API docs | [docs.rs/tracing](https://docs.rs/tracing) |
+
+`tracing` follows the Tokio project's compiler support policy: the current stable Rust compiler and the three most recent minor versions before it are always supported. Increasing the minimum supported version is not considered a semver-breaking change as long as this policy is followed.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Add `tracing` to your project, initialize a subscriber, and emit your first spans and events in minutes.
+  </Card>
+  <Card
+    title="Core Concepts"
+    icon="book-open"
+    href="/core-concepts"
+  >
+    Deep-dive into spans, events, subscribers, levels, and structured fields — the building blocks of every trace.
+  </Card>
+</CardGroup>

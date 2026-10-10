@@ -1,0 +1,274 @@
+---
+title: "The Dispatch System: Routing Trace Data to Subscribers"
+sidebarTitle: "Dispatcher"
+description: "Reference for the Dispatch struct, global and thread-local routing, get_default, with_default, set_global_default, WeakDispatch, and the callsite registry."
+---
+
+The dispatcher is the bridge between the code that _produces_ tracing data (span and event macros) and the code that _consumes_ it (a [`Subscriber`](/api/subscriber)). Every time a span is created or an event is fired, the instrumentation calls into the dispatcher to reach the currently active subscriber. The `Dispatch` struct is a type-erased, reference-counted wrapper around any `Subscriber` implementation, allowing it to be stored and passed without knowing the concrete type.
+
+---
+
+## The `Dispatch` Struct
+
+```rust
+#[derive(Clone)]
+pub struct Dispatch { /* private fields */ }
+```
+
+A `Dispatch` holds an `Arc<dyn Subscriber + Send + Sync>` (or a `'static` reference for the global default) and delegates every `Subscriber` method call to the wrapped implementation. Because it is `Clone + Send + Sync`, a `Dispatch` can be freely shared across threads. The `tracing` crate's instrumentation macros always route through a `Dispatch` — they never hold a direct reference to a concrete subscriber type.
+
+### `Dispatch::new`
+
+```rust
+pub fn new<S>(subscriber: S) -> Self
+where
+    S: Subscriber + Send + Sync + 'static,
+```
+
+Wraps a `Subscriber` in a `Dispatch`, registers the dispatch with the global callsite registry (so existing callsites have their interest re-evaluated), and returns the new `Dispatch`.
+
+```rust
+use tracing::Dispatch;
+
+let dispatch = Dispatch::new(my_subscriber);
+```
+
+---
+
+### `Dispatch::none`
+
+```rust
+pub fn none() -> Self
+```
+
+Returns a `Dispatch` that discards all events and spans. Backed by `NoSubscriber`. Useful as a sentinel or default value.
+
+```rust
+use tracing::Dispatch;
+
+let noop = Dispatch::none();
+assert!(noop.is::<tracing_core::subscriber::NoSubscriber>());
+```
+
+---
+
+### `Dispatch::downgrade`
+
+```rust
+pub fn downgrade(&self) -> WeakDispatch
+```
+
+Creates a [`WeakDispatch`](#weakdispatch) from this `Dispatch`. Analogous to `Arc::downgrade`. The primary use case is allowing a `Subscriber` to hold a non-owning back-reference to its own `Dispatch` without creating a reference-count cycle.
+
+```rust
+use tracing::Dispatch;
+
+struct MySubscriber {
+    self_ref: Option<tracing_core::dispatcher::WeakDispatch>,
+}
+
+impl tracing_core::Subscriber for MySubscriber {
+    fn on_register_dispatch(&self, dispatch: &Dispatch) {
+        // Store a weak reference instead of a strong Dispatch
+        let weak = dispatch.downgrade();
+        // self.self_ref = Some(weak);
+    }
+    // ...
+}
+```
+
+---
+
+### Delegating Methods
+
+`Dispatch` forwards every `Subscriber` method to its inner subscriber. The delegation methods have identical signatures to the corresponding `Subscriber` methods:
+
+| `Dispatch` method | Delegates to |
+|-------------------|--------------|
+| `dispatch.enabled(metadata)` | `Subscriber::enabled` |
+| `dispatch.new_span(attrs)` | `Subscriber::new_span` |
+| `dispatch.record(id, values)` | `Subscriber::record` |
+| `dispatch.record_follows_from(id, follows)` | `Subscriber::record_follows_from` |
+| `dispatch.event(event)` | `Subscriber::event_enabled` + `Subscriber::event` |
+| `dispatch.enter(id)` | `Subscriber::enter` |
+| `dispatch.exit(id)` | `Subscriber::exit` |
+| `dispatch.clone_span(id)` | `Subscriber::clone_span` |
+| `dispatch.try_close(id)` | `Subscriber::try_close` |
+| `dispatch.current_span()` | `Subscriber::current_span` |
+| `dispatch.register_callsite(metadata)` | `Subscriber::register_callsite` |
+
+Note that `dispatch.event(event)` first calls `Subscriber::event_enabled` and only proceeds to `Subscriber::event` if it returns `true`.
+
+---
+
+### Type Inspection
+
+```rust
+pub fn is<T: Any>(&self) -> bool
+pub fn downcast_ref<T: Any>(&self) -> Option<&T>
+```
+
+Allow downcasting a `Dispatch` back to its concrete `Subscriber` type when needed.
+
+```rust
+use tracing::Dispatch;
+
+let dispatch = Dispatch::new(MySubscriber::new());
+if let Some(sub) = dispatch.downcast_ref::<MySubscriber>() {
+    sub.flush();
+}
+```
+
+---
+
+## `WeakDispatch`
+
+```rust
+#[derive(Clone)]
+pub struct WeakDispatch { /* private fields */ }
+```
+
+A non-owning reference to the `Subscriber` inside a `Dispatch`. Analogous to `std::sync::Weak`. Calling `upgrade()` returns `Some(Dispatch)` if the subscriber is still alive, or `None` if all strong `Dispatch` handles have been dropped.
+
+```rust
+pub fn upgrade(&self) -> Option<Dispatch>
+```
+
+```rust
+use tracing_core::subscriber::NoSubscriber;
+use tracing::Dispatch;
+
+let strong = Dispatch::new(NoSubscriber::default());
+let weak = strong.downgrade();
+
+assert!(weak.upgrade().is_some());
+drop(strong);
+assert!(weak.upgrade().is_none());
+```
+
+---
+
+## The Global Dispatcher
+
+The global dispatcher is a single process-wide `Dispatch` used as the fallback when no thread-local override is active.
+
+### `dispatcher::set_global_default`
+
+```rust
+pub fn set_global_default(dispatcher: Dispatch) -> Result<(), SetGlobalDefaultError>
+```
+
+Sets the process-wide global default dispatcher. Can only be called **once** per process; subsequent calls return `Err(SetGlobalDefaultError)`.
+
+```rust
+use tracing::dispatcher;
+
+dispatcher::set_global_default(Dispatch::new(my_subscriber))
+    .expect("global default already set");
+```
+
+<Note>
+Libraries should **never** call `set_global_default`. Only the top-level binary (the application) should configure the global default, so that all libraries in the dependency graph share the same subscriber.
+</Note>
+
+---
+
+## The Thread-Local Dispatcher
+
+Thread-local dispatchers shadow the global default for the duration of a scope. They are not inherited by spawned threads.
+
+### `dispatcher::with_default`
+
+```rust
+pub fn with_default<T>(dispatcher: &Dispatch, f: impl FnOnce() -> T) -> T
+```
+
+Sets `dispatcher` as the default for the current thread while `f` executes. The previous default is restored when `f` returns or panics.
+
+```rust
+use tracing::dispatcher::{self, Dispatch};
+
+let dispatch = Dispatch::new(test_subscriber);
+dispatcher::with_default(&dispatch, || {
+    // All tracing here goes to test_subscriber
+    do_traced_work();
+});
+// Previous dispatcher restored here
+```
+
+---
+
+### `dispatcher::set_default`
+
+```rust
+pub fn set_default(dispatcher: &Dispatch) -> DefaultGuard
+```
+
+Like `with_default`, but returns a `DefaultGuard` instead of taking a closure. The previous default is restored when the guard is dropped.
+
+```rust
+use tracing::dispatcher::{self, Dispatch};
+
+let dispatch = Dispatch::new(my_subscriber);
+let _guard = dispatcher::set_default(&dispatch);
+// my_subscriber is the default until _guard is dropped
+```
+
+---
+
+### `dispatcher::get_default`
+
+```rust
+pub fn get_default<T, F>(mut f: F) -> T
+where
+    F: FnMut(&Dispatch) -> T,
+```
+
+Executes a closure with a reference to the current thread's default `Dispatch`. This is the function called by every tracing macro under the hood to reach the active subscriber. It checks the thread-local state first; if no thread-local dispatch is set it falls back to the global default.
+
+<Note>
+Calls to `get_default` are **not** reentrant. If `get_default` is called while already inside a `get_default` closure (e.g., from within a subscriber method), the inner call receives `Dispatch::none()` instead of the real dispatch, preventing infinite recursion.
+</Note>
+
+```rust
+use tracing_core::dispatcher;
+
+// Used in custom instrumentation:
+dispatcher::get_default(|dispatch| {
+    if dispatch.enabled(&my_metadata) {
+        dispatch.event(&my_event);
+    }
+});
+```
+
+---
+
+## The Callsite Registry
+
+Every span and event in a `tracing`-instrumented program corresponds to exactly one _callsite_ — a static location in the compiled code. When a callsite is first executed, `Dispatch::register_callsite` is called on the active dispatcher, which returns an `Interest` value that the callsite registry caches:
+
+- **`Interest::always()`** — the callsite is considered hot-path enabled; future executions skip `enabled` entirely
+- **`Interest::sometimes()`** — `enabled` is called on every execution
+- **`Interest::never()`** — the callsite is disabled until the cache is invalidated
+
+This design means that **filtering is O(1)** for callsites with a stable `Interest::always` or `Interest::never` verdict. The cache is rebuilt (by calling `callsite::rebuild_interest_cache()`) whenever a new subscriber is installed, ensuring correctness when the set of active subscribers changes at runtime.
+
+---
+
+## `SetGlobalDefaultError`
+
+```rust
+pub struct SetGlobalDefaultError { /* private */ }
+```
+
+Returned by `set_global_default` when a global default has already been set. Implements `Display`, `Debug`, and (on `std`) `Error`.
+
+```rust
+use tracing::dispatcher::{self, Dispatch};
+use tracing_core::subscriber::NoSubscriber;
+
+match dispatcher::set_global_default(Dispatch::new(NoSubscriber::default())) {
+    Ok(()) => println!("subscriber installed"),
+    Err(e) => eprintln!("failed to set subscriber: {}", e),
+}
+```
